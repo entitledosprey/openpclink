@@ -43,6 +43,78 @@ def axis_cell(value: float, breakpoints: list[float]) -> int | None:
     return at if axis[at] - value < value - axis[at - 1] else at - 1
 
 
+class DialGauge(QtWidgets.QWidget):
+    """One round gauge. Values outside its range pin at the end and show as text."""
+
+    SWEEP_START = 225.0
+    SWEEP = 270.0
+
+    def __init__(self, caption: str, units: str, minimum: float, maximum: float) -> None:
+        super().__init__()
+        self.caption, self.units = caption, units
+        self.minimum, self.maximum = minimum, maximum if maximum > minimum else minimum + 1
+        self.value: float | None = None
+        self.text = "--"
+        self.setMinimumSize(130, 130)
+
+    def set_value(self, value: float, text: str) -> None:
+        self.value, self.text = value, text
+        self.update()
+
+    def needle_fraction(self) -> float:
+        if self.value is None:
+            return 0.0
+        return min(max((self.value - self.minimum) / (self.maximum - self.minimum), 0.0), 1.0)
+
+    def paintEvent(self, _event: QtGui.QPaintEvent) -> None:
+        import math
+
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        side = min(self.width(), self.height()) - 12
+        box = QtCore.QRectF((self.width() - side) / 2, (self.height() - side) / 2, side, side)
+        text_colour = self.palette().text().color()
+        painter.setPen(QtGui.QPen(text_colour.lighter(170), 6))
+        painter.drawArc(box, int((self.SWEEP_START - self.SWEEP) * 16), int(self.SWEEP * 16))
+        fraction = self.needle_fraction()
+        painter.setPen(QtGui.QPen(QtGui.QColor(*heat_colour(fraction, 0, 1)).darker(110), 6))
+        painter.drawArc(box, int(self.SWEEP_START * 16), int(-self.SWEEP * fraction * 16))
+        angle = math.radians(self.SWEEP_START - self.SWEEP * fraction)
+        centre = box.center()
+        painter.setPen(QtGui.QPen(text_colour, 2))
+        painter.drawLine(
+            centre,
+            QtCore.QPointF(centre.x() + math.cos(angle) * side * 0.40, centre.y() - math.sin(angle) * side * 0.40),
+        )
+        painter.drawText(box.adjusted(0, side * 0.64, 0, 0), QtCore.Qt.AlignmentFlag.AlignHCenter, self.text)
+        small = painter.font()
+        small.setPointSizeF(max(small.pointSizeF() - 2, 7))
+        painter.setFont(small)
+        painter.drawText(box.adjusted(0, side * 0.80, 0, 0), QtCore.Qt.AlignmentFlag.AlignHCenter, self.caption)
+
+
+class GaugePanel(QtWidgets.QWidget):
+    """A grid of dial gauges for the chosen live values."""
+
+    COLUMNS = 2
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.layout_ = QtWidgets.QGridLayout(self)
+        self.gauges: dict[int, DialGauge] = {}
+
+    def rebuild(self, specs: list[tuple[int, str, str, float, float]]) -> None:
+        for gauge in self.gauges.values():
+            self.layout_.removeWidget(gauge)
+            gauge.hide()
+            gauge.deleteLater()
+        self.gauges = {}
+        for position, (data_id, caption, units, minimum, maximum) in enumerate(specs):
+            gauge = DialGauge(caption, units, minimum, maximum)
+            self.gauges[data_id] = gauge
+            self.layout_.addWidget(gauge, position // self.COLUMNS, position % self.COLUMNS)
+
+
 class SurfaceView(QtWidgets.QWidget):
     """A rotatable wireframe of a table."""
 

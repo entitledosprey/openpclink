@@ -87,7 +87,7 @@ address box. It is a simulator, so it says nothing about your ECU.
 ## Compared with PCLink
 
 **Included:** ECU connection (G4X USB tested; G5 USB and WiFi untested), settings menus in PCLink's order,
-per-ECU hiding, live editing, Store, runtime values tree and live list, statistics, tables with heat map, live
+per-ECU hiding, live editing, Store, runtime values tree, live list and dial gauges, statistics, tables with heat map, live
 position, axis editing, bulk edits, copy/paste and 3D view, map files (open, save, compare, offline editing),
 PC logging to CSV with a plot viewer, and Link's manual as text.
 
@@ -101,7 +101,7 @@ updates, Restore to Factory Settings, setting or removing passwords, ECU unlock 
 - Loading a map file into an ECU.
 - ECU log download and setup, trigger scope, Clear Statistics and fault code clearing, TPS and MAP calibration wizards.
 - Guided tools: CAN setup dialog (CAN settings are in the menus), Quick Tune, Quick Trim, injector and base-timing wizards.
-- Display: gauges, layouts and pop-outs, mixture map, vehicle plan, engine timing diagram, XY plots, audio.
+- Display: other gauge styles, layouts and pop-outs, mixture map, vehicle plan, engine timing diagram, XY plots, audio.
 - PCLink's own log files, drag-run and log-section tools, unit selection (metric only), colour themes.
 - G5 comms-processor settings (parameters from 10000, such as WiFi).
 

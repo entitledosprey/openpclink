@@ -18,7 +18,7 @@ from .importer import ImportFailed, import_pclink
 from .logfile import PcLogger, read_log
 from .mapfile import MapError, MapFile, OfflineEcu, compare
 from .protocol import READ_ONLY_ENV, ForbiddenCommand, ProtocolError
-from .views import LogViewer, SurfaceView, axis_cell, heat_colour, used_axis_length
+from .views import GaugePanel, LogViewer, SurfaceView, axis_cell, heat_colour, used_axis_length
 from .transports import TransportError, list_ports, open_transport
 
 POLL_INTERVAL_S = 0.1
@@ -528,6 +528,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.manual = HelpManual()
         self.right_tabs = QtWidgets.QTabWidget()
         self.right_tabs.addTab(self.gauges, "Live")
+        self.gauge_panel = GaugePanel()
+        self.right_tabs.addTab(self.gauge_panel, "Gauges")
         self.right_tabs.addTab(self.help_view, "Help")
         splitter.addWidget(self.right_tabs)
         splitter.setSizes([280, 620, 300])
@@ -760,7 +762,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.gauge_ids = [by_caption[c] for c in GAUGE_CAPTIONS if c in by_caption]
         self._lay_out_gauges()
 
+    def _gauge_spec(self, data_id: int) -> tuple[int, str, str, float, float]:
+        parameter = self.database.parameter(data_id)
+        low = parameter.minimum if parameter.minimum is not None else 0.0
+        high = parameter.maximum if parameter.maximum is not None else low + 100.0
+        return (data_id, parameter.caption, parameter.units, low, high)
+
     def _lay_out_gauges(self) -> None:
+        self.gauge_panel.rebuild([self._gauge_spec(i) for i in self.gauge_ids])
         self.gauges.setRowCount(len(self.gauge_ids))
         for row, data_id in enumerate(self.gauge_ids):
             self.gauges.setItem(row, 0, QtWidgets.QTableWidgetItem(self.database.parameter(data_id).caption))
@@ -774,7 +783,10 @@ class MainWindow(QtWidgets.QMainWindow):
         for row, data_id in enumerate(self.gauge_ids):
             parameter = self.database.parameter(data_id)
             decimals = parameter.decimals if parameter.decimals is not None else 1
-            self.gauges.item(row, 1).setText(self._format_live(parameter, ecu.get(data_id), decimals))
+            text = self._format_live(parameter, ecu.get(data_id), decimals)
+            self.gauges.item(row, 1).setText(text)
+            if data_id in self.gauge_panel.gauges:
+                self.gauge_panel.gauges[data_id].set_value(ecu.get(data_id), text)
         for data_id, editor in self.form.editors.items():
             if self._is_live(data_id):
                 self.form.refresh(data_id)

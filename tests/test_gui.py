@@ -276,3 +276,25 @@ def test_pc_logging_records_while_connected(session, tmp_path):
     assert pump(app, lambda: window.worker.logger and window.worker.logger.samples >= 3)
     window.stop_logging()
     assert len(read_log(tmp_path / "log.csv").time) >= 3
+
+
+def test_gauges_follow_live_values_and_never_write(session):
+    app, window, sim = session
+    data_id = window.gauge_ids[0]
+    gauge = window.gauge_panel.gauges[data_id]
+    assert pump(app, lambda: gauge.value is not None)
+    window.right_tabs.setCurrentWidget(window.gauge_panel)
+    window.gauge_panel.grab()
+    assert sim.writes == []
+
+
+def test_gauge_needle_pins_at_the_ends_of_its_range():
+    from openpclink.views import DialGauge
+
+    gauge = DialGauge("RPM", "RPM", 0, 8000)
+    gauge.set_value(4000, "4000")
+    assert gauge.needle_fraction() == 0.5
+    gauge.set_value(65535, "65535")
+    assert gauge.needle_fraction() == 1.0
+    gauge.set_value(-5, "-5")
+    assert gauge.needle_fraction() == 0.0

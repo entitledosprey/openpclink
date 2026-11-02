@@ -1,9 +1,9 @@
 # What has and has not been verified
 
-## Verified on a real ECU, read-only
+## Verified on a real ECU
 
-A Link G4X (FT232H, firmware 7.8.2, Link ID 23001) on Ubuntu 26.04 over USB. **By the owner's instruction,
-nothing has been written to it.** Testing used read-only mode, which refuses writes before they reach the wire.
+A Link G4X (FT232H, firmware 7.8.2, Link ID 23001) in the owner's daily-driven car, on Ubuntu 26.04 over USB.
+Everything except the write test below used read-only mode, which refuses writes before they reach the wire.
 
 | Check | Result |
 |---|---|
@@ -16,10 +16,26 @@ nothing has been written to it.** Testing used read-only mode, which refuses wri
 
 A rare truncated poll (`got 11 of 1954`) was seen once in the GUI and recovered by a retry. Its cause is unknown.
 
+### Write test (owner approved; engine stopped, ignition on, RAM only)
+
+| Check | Result |
+|---|---|
+| Text setting (Description) changed, read back from the ECU | Pass |
+| Number setting (GP RPM Limit 2 Cut Decay Time, limit off) changed, read back from the ECU | Pass |
+| Only bytes inside those settings changed | Pass |
+| Write replies are an exact echo of the data | Confirmed, as the simulator assumed |
+| Reverted: all 58,033 config bytes match the snapshot | Pass, 0 differences |
+| Text change repeated through the packaged 0.2.0 Linux build (unpacked `.tar.gz`), reverted | Pass |
+
+**Open question:** a full read straight after that packaged-build test showed 2 bytes differing from the snapshot.
+Five further full reads over the next few seconds showed 0 differences. Which bytes they were was not captured, so
+the cause is unknown. No Store was sent, so nothing reached flash. A power cycle reloads from flash.
+
 ## Not verified
 
-- **Any write or Store on real hardware.** Everything about writing rests on the simulator and on comparing bytes
-  with real PCLink. Real write replies have never been seen.
+- **Store on real hardware.** It was deliberately not run on this car. It rests on the real PCLink capture.
+- Writes to bitfields and tables on real hardware (byte-compared with real PCLink, not run on the car).
+- Writing with the engine running, or through the GUI on real hardware.
 - G5 USB, serial and WiFi on real hardware.
 - That displayed values match Windows PCLink on the same ECU, side by side. The Wine check is close to this,
   but used a saved copy.

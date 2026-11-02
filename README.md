@@ -3,7 +3,7 @@
 An unofficial macOS and Linux tuning client for Link G4X and G5 ECUs, written from a
 reverse-engineered reading of PCLink 7.8.2. Not made or supported by Link Engine Management.
 
-**Status: reads from a real G4X ECU; writing has never been tried on real hardware.** See
+**Status: reads and changes parameters on a real G4X ECU in RAM; Store has not been run on real hardware.** See
 [Verification](docs/VERIFICATION.md) and follow the first-connection steps below. A wrong setting can
 damage an engine. To run with writes blocked at the protocol layer, start it with
 `OPENPCLINK_READ_ONLY=1` in the environment.

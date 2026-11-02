@@ -96,8 +96,10 @@ updates, Restore to Factory Settings, setting or removing passwords, ECU unlock 
 
 **Not built yet:**
 
-- `D_menu.dll`'s rules. PCLink hides many dependent settings and runs cross-field checks from this DLL
-  (about 160,000 decompiled lines). Here, forms can show settings PCLink would hide, and those checks do not run.
+- `D_menu.dll`'s rules (about 160,000 decompiled lines). PCLink uses this DLL to hide dependent settings, run
+  cross-field checks, and **change related settings for you**, such as allocating a table when a feature is
+  switched on. None of that happens here. **Changing a mode or function setting here can leave related settings
+  unset that PCLink would have set. Until this is ported, change those in official PCLink.**
 - Loading a map file into an ECU.
 - ECU log download and setup, trigger scope, Clear Statistics and fault code clearing, TPS and MAP calibration wizards.
 - Guided tools: CAN setup dialog (CAN settings are in the menus), Quick Tune, Quick Trim, injector and base-timing wizards.

@@ -8,9 +8,27 @@ from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 
-from .importer import bundled_db_path, default_db_path
+from .importer import bundled_db_path, bundled_help_path, default_db_path, default_help_path
 
 _MAX_INHERIT_DEPTH = 32
+
+
+# PCLink's metric defaults for parameters that give a value type, not a unit.
+_VALUE_TYPE_UNITS = {
+    "Pressure": "kPa",
+    "BigPressure": "kPa",
+    "Temperature": "°C",
+    "Speed": "km/h",
+    "Lambda": "λ",
+    "Volume": "L",
+}
+
+# The order of the top of PCLink's settings menu, as shown by the real program.
+MENU_ORDER = (
+    "Configuration", "Fuel", "Ignition", "Engine Protection", "Auxiliary Outputs", "Digital Inputs",
+    "Analog Inputs", "Triggers", "MotorSport", "Idle Speed Control", "Electronic Throttle",
+    "Boost Control", "Knock Control", "VVT Control", "Chassis and Body", "CAN",
+)
 
 
 class DatabaseMissing(Exception):
@@ -26,6 +44,10 @@ def _number(value: str | None) -> float | None:
 
 def _int(value: str | None) -> int | None:
     return int(value) if value and value.isdigit() else None
+
+
+def _int_list(value: str | None) -> list[int]:
+    return [int(item) for item in (value or "").split(",") if item.strip().isdigit()]
 
 
 def _csv_values(text: str | None) -> list[str]:
@@ -53,6 +75,14 @@ class Parameter:
     help_url: str
     column_axis_id: int | None = None
     row_axis_id: int | None = None
+    priority: int = 0
+    hidden_on_ecus: frozenset[int] = frozenset()
+    children_by_option: tuple[tuple[int, ...], ...] = ()
+    hidden_options: tuple[frozenset[int], ...] = ()
+    warnings: tuple[str, ...] = ()
+    active_zone: int | None = None
+    column_source_id: int | None = None
+    row_source_id: int | None = None
 
     @property
     def is_table(self) -> bool:
@@ -65,6 +95,7 @@ class Database:
         self._strings: dict[int, str] = {int(k): v for k, v in raw["strings"].items()}
         self.map_key: tuple[int, ...] = tuple(raw["map_key"])
         self._cache: dict[int, Parameter] = {}
+        self._controllers: dict[int, list[int]] | None = None
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Database":
@@ -115,7 +146,7 @@ class Database:
             key=node["name"],
             caption=self._string(prop("Caption")) or node["name"],
             path=self._menu_path(data_id),
-            units=prop("Units") or "",
+            units=prop("Units") or _VALUE_TYPE_UNITS.get(prop("ValueType") or "", ""),
             minimum=_number(prop("Min")),
             maximum=_number(prop("Max")),
             decimals=int(decimals) if decimals is not None else None,
@@ -128,9 +159,66 @@ class Database:
             help_url=prop("HelpURL") or "",
             column_axis_id=_int(prop("xLabels")),
             row_axis_id=_int(prop("yLabels")),
+            priority=_int(prop("PriorityPos")) or 0,
+            hidden_on_ecus=frozenset(_int_list(prop("InvisibleLICs"))),
+            children_by_option=tuple(tuple(_int_list(item)) for item in _csv_values(prop("VisibleChildren"))),
+            hidden_options=tuple(frozenset(_int_list(item)) for item in _csv_values(prop("InvisibleLICsSL"))),
+            warnings=tuple(self._string(item.strip()) if item.strip() != "0" else "" for item in _csv_values(prop("Warnings"))),
+            active_zone=_int(prop("ActiveZone")),
+            column_source_id=_int(prop("XAxisParameterID")),
+            row_source_id=_int(prop("YAxisParameterID")),
         )
         self._cache[data_id] = parameter
         return parameter
+
+    def controllers(self) -> dict[int, list[int]]:
+        """For each parameter, the parents whose current option decides if it shows."""
+        if self._controllers is None:
+            self._controllers = {}
+            for data_id in self.ids:
+                for child in {c for option in self.parameter(data_id).children_by_option for c in option}:
+                    self._controllers.setdefault(child, []).append(data_id)
+        return self._controllers
+
+    def is_visible(self, data_id: int, link_id: int, option_of, _seen: frozenset[int] = frozenset()) -> bool:
+        """Should PCLink's data show this for an ECU model, given current options?
+
+        `option_of(id)` returns a parameter's option index, or None if it is absent.
+        """
+        if not self.known(data_id) or data_id in _seen:
+            return False
+        parameter = self.parameter(data_id)
+        if not parameter.visible or link_id in parameter.hidden_on_ecus:
+            return False
+        parents = self.controllers().get(data_id)
+        if not parents:
+            return True
+        seen = _seen | {data_id}
+        for parent_id in parents:
+            option = option_of(parent_id)
+            children = self.parameter(parent_id).children_by_option
+            if (
+                option is not None
+                and 0 <= option < len(children)
+                and data_id in children[option]
+                and self.is_visible(parent_id, link_id, option_of, seen)
+            ):
+                return True
+        return False
+
+    def visible_options(self, data_id: int, link_id: int) -> list[tuple[int, str]]:
+        """The (value, text) choices this ECU model offers."""
+        parameter = self.parameter(data_id)
+        hidden = parameter.hidden_options
+        return [
+            (value, text)
+            for value, text in enumerate(parameter.options)
+            if not (value < len(hidden) and link_id in hidden[value])
+        ]
+
+    def warning_for(self, data_id: int, option: int) -> str:
+        warnings = self.parameter(data_id).warnings
+        return warnings[option] if 0 <= option < len(warnings) else ""
 
     def known(self, data_id: int) -> bool:
         return data_id in self._params
@@ -156,3 +244,18 @@ class Database:
             raise ValueError(f"{parameter.caption}: {value} is below the minimum {parameter.minimum}")
         if parameter.maximum is not None and value > parameter.maximum:
             raise ValueError(f"{parameter.caption}: {value} is above the maximum {parameter.maximum}")
+
+
+class HelpManual:
+    """Pages of Link's manual, found by the HelpURL of a parameter."""
+
+    def __init__(self) -> None:
+        self.pages: dict[str, str] = {}
+        for path in (default_help_path(), bundled_help_path()):
+            if path and path.exists():
+                with gzip.open(path, "rt", encoding="utf-8") as stream:
+                    self.pages = json.load(stream)
+                return
+
+    def page_for(self, help_url: str) -> str | None:
+        return self.pages.get(help_url.partition("#")[0].lower())

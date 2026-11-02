@@ -164,3 +164,36 @@ def test_out_of_range_value_is_refused_by_session(program_dir, database):
     assert sim.writes == []
     session.close()
     server.close()
+
+
+def test_form_order_matches_real_pclink_screenshot(database):
+    # Seen in real PCLink 7.8.2: Configuration, then RPM Limit, order by PriorityPos.
+    order = lambda ids: sorted(ids, key=lambda i: -database.parameter(i).priority)
+    assert order([698, 2250, 1332, 2428, 2377, 1123]) == [2428, 1332, 2377, 698, 2250, 1123]
+    assert order([2816, 1585, 2754]) == [2754, 1585, 2816]
+
+
+def test_units_fall_back_to_the_value_type(database):
+    assert database.parameter(1001).units == "kPa"
+    assert database.parameter(1004).units == "°C"
+
+
+def test_settings_hidden_on_this_ecu_model(database):
+    assert 23001 in database.parameter(1340).hidden_on_ecus
+    assert not database.is_visible(1340, 23001, lambda _: 0)
+    assert database.is_visible(1340, 54000, lambda _: 0)
+
+
+def test_visible_children_follow_the_parent_option(database):
+    parent = next(i for i in database.ids if len(database.parameter(i).children_by_option) > 1
+                  and database.parameter(i).visible
+                  and any(database.parameter(i).children_by_option)
+                  and not database.parameter(i).hidden_on_ecus
+                  and i not in database.controllers())
+    options = database.parameter(parent).children_by_option
+    shown_at = next(n for n, children in enumerate(options) if children)
+    child = options[shown_at][0]
+    hidden_at = next((n for n, children in enumerate(options) if child not in children), None)
+    assert database.is_visible(child, 1, lambda i: shown_at if i == parent else 0) or database.controllers()[child] != [parent]
+    if hidden_at is not None and database.controllers()[child] == [parent]:
+        assert not database.is_visible(child, 1, lambda i: hidden_at if i == parent else 0)

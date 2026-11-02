@@ -3,23 +3,25 @@
 An unofficial macOS and Linux tuning client for Link G4X and G5 ECUs, written from a
 reverse-engineered reading of PCLink 7.8.2. Not made or supported by Link Engine Management.
 
-**Status: not yet tested on a real ECU.** See [Verification](docs/VERIFICATION.md) and follow the
-first-connection steps below. A wrong setting can damage an engine.
+**Status: reads from a real G4X ECU; writing has never been tried on real hardware.** See
+[Verification](docs/VERIFICATION.md) and follow the first-connection steps below. A wrong setting can
+damage an engine. To run with writes blocked at the protocol layer, start it with
+`OPENPCLINK_READ_ONLY=1` in the environment.
 
 ## Install
 
-Download from this repo's [v0.1.2 release](https://github.com/entitledosprey/openpclink/releases/tag/v0.1.2),
-or with the GitHub CLI: `gh release download v0.1.2 -R entitledosprey/openpclink -p '<file>'`.
+Download from this repo's [v0.2.0 release](https://github.com/entitledosprey/openpclink/releases/tag/v0.2.0),
+or with the GitHub CLI: `gh release download v0.2.0 -R entitledosprey/openpclink -p '<file>'`.
 
 The packages contain Link's parameter data, so **keep this repo private and do not share them**;
 they are not licensed for redistribution.
 
 | System | File | Install |
 |---|---|---|
-| macOS (Apple Silicon) | `OpenPCLink-0.1.2-macos-arm64.dmg` | Open it, drag to Applications, then see below |
-| Debian/Ubuntu x86-64 | `openpclink_0.1.2_amd64.deb` | `sudo apt install ./openpclink_0.1.2_amd64.deb` |
-| Debian/Ubuntu ARM64 | `openpclink_0.1.2_arm64.deb` | `sudo apt install ./openpclink_0.1.2_arm64.deb` |
-| Other Linux | `OpenPCLink-0.1.2-linux-*.tar.gz` | Unpack, run `OpenPCLink`, install `packaging/70-link-ecu.rules` to `/etc/udev/rules.d/` |
+| macOS (Apple Silicon) | `OpenPCLink-0.2.0-macos-arm64.dmg` | Open it, drag to Applications, then see below |
+| Debian/Ubuntu x86-64 | `openpclink_0.2.0_amd64.deb` | `sudo apt install ./openpclink_0.2.0_amd64.deb` |
+| Debian/Ubuntu ARM64 | `openpclink_0.2.0_arm64.deb` | `sudo apt install ./openpclink_0.2.0_arm64.deb` |
+| Other Linux | `OpenPCLink-0.2.0-linux-*.tar.gz` | Unpack, run `OpenPCLink`, install `packaging/70-link-ecu.rules` to `/etc/udev/rules.d/` |
 
 **macOS:** the app is not notarised, so a downloaded copy is blocked until you clear its quarantine flag.
 This has not been tested on a second Mac:
@@ -82,11 +84,25 @@ address box. It is a simulator, so it says nothing about your ECU.
 - **The memory layout comes from the ECU itself**, and a malformed one refuses the connection.
 - Number of Cylinders, Engine Type and Custom TDC are refused while the engine runs.
 
-## Not implemented
+## Compared with PCLink
 
-Firmware updates, restoring factory settings, ECU unlock codes, setting or removing passwords, trigger
-scope, ECU logging, opening/saving `.pclx`/`.pcl5` maps, WiFi and other comms-processor settings
-(parameters from 10000), the original's conditional hiding of settings, gauges and layouts. Use
-official PCLink for these.
+**Included:** ECU connection (G4X USB tested; G5 USB and WiFi untested), settings menus in PCLink's order,
+per-ECU hiding, live editing, Store, runtime values tree and live list, statistics, tables with heat map, live
+position, axis editing, bulk edits, copy/paste and 3D view, map files (open, save, compare, offline editing),
+PC logging to CSV with a plot viewer, and Link's manual as text.
+
+**Deliberately excluded, because they can brick or wipe an ECU and cannot be tested safely:** firmware
+updates, Restore to Factory Settings, setting or removing passwords, ECU unlock codes.
+
+**Not built yet:**
+
+- `D_menu.dll`'s rules. PCLink hides many dependent settings and runs cross-field checks from this DLL
+  (about 160,000 decompiled lines). Here, forms can show settings PCLink would hide, and those checks do not run.
+- Loading a map file into an ECU.
+- ECU log download and setup, trigger scope, Clear Statistics and fault code clearing, TPS and MAP calibration wizards.
+- Guided tools: CAN setup dialog (CAN settings are in the menus), Quick Tune, Quick Trim, injector and base-timing wizards.
+- Display: gauges, layouts and pop-outs, mixture map, vehicle plan, engine timing diagram, XY plots, audio.
+- PCLink's own log files, drag-run and log-section tools, unit selection (metric only), colour themes.
+- G5 comms-processor settings (parameters from 10000, such as WiFi).
 
 See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the protocol.

@@ -8,6 +8,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -115,6 +116,8 @@ def import_pclink(source: Path, destination: Path | None = None) -> Path:
             "strings": _parse_strings(strings_raw.decode("utf-16")),
             "map_key": list(map_key),
         }
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _extract_help(folder, destination.with_name("pclink-help.json.gz"))
     finally:
         if temp:
             shutil.rmtree(temp, ignore_errors=True)
@@ -122,3 +125,43 @@ def import_pclink(source: Path, destination: Path | None = None) -> Path:
     with gzip.open(destination, "wt", encoding="utf-8") as out:
         json.dump(database, out)
     return destination
+
+
+def default_help_path() -> Path:
+    return default_db_path().with_name("pclink-help.json.gz")
+
+
+def bundled_help_path() -> Path | None:
+    bundled = bundled_db_path()
+    if bundled is None:
+        return None
+    path = bundled.with_name("pclink-help.json.gz")
+    return path if path.exists() else None
+
+
+def _extract_help(folder: Path, destination: Path) -> bool:
+    """Convert the CHM manual's pages to a small searchable file (text only, no images)."""
+    chm = folder / "Help_File_ENG.chm"
+    tool = shutil.which("7z") or shutil.which("7zz") or shutil.which("7za")
+    if tool is None or not chm.exists():
+        return False
+    with tempfile.TemporaryDirectory(prefix="openpclink-help-") as temp:
+        done = subprocess.run([tool, "x", "-y", f"-o{temp}", str(chm)], capture_output=True)
+        if done.returncode != 0:
+            return False
+        pages = {}
+        for page in Path(temp).rglob("*.htm*"):
+            html = page.read_bytes().decode("utf-8", "replace")
+            pages[page.stem.lower()] = _clean_help_page(html)
+    if not pages:
+        return False
+    with gzip.open(destination, "wt", encoding="utf-8") as out:
+        json.dump(pages, out)
+    return True
+
+
+def _clean_help_page(html: str) -> str:
+    html = re.sub(r"(?is)<(script|style|head)\b.*?</\1>", "", html)
+    html = re.sub(r"(?is)<img\b[^>]*>", "", html)
+    html = re.sub(r'(?is)<div id="header".*?</div>\s*</div>', "", html, count=1)
+    return html.strip()

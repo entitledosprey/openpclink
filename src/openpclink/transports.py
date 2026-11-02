@@ -20,6 +20,7 @@ FALLBACK_BAUD = 115_200
 FT232H_BAUD = 4_700_000
 FTDI_X_BAUD = 1_171_875
 WIFI_PORT = 10470
+FTDI_LATENCY_MS = 16
 
 
 def _use_bundled_libusb() -> None:
@@ -139,7 +140,10 @@ class FtdiTransport:
             self._ftdi.set_baudrate(FT232H_BAUD if hi_speed else FTDI_X_BAUD, constrain=False)
             self._ftdi.set_line_property(8, 1, "N")
             self._ftdi.set_flowctrl("")
-            self._ftdi.set_latency_timer(2)
+            # PCLink runs at the chip's 16 ms default. Measured on an FT232H ECU,
+            # 1-2 ms cut about 60% of short replies off at 17 bytes (issue seen as
+            # "truncated reply"); 16 ms delivered them all.
+            self._ftdi.set_latency_timer(FTDI_LATENCY_MS)
         except (FtdiError, UsbToolsError, ValueError, OSError) as exc:
             raise TransportError(_ftdi_open_message(exc)) from exc
 

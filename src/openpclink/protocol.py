@@ -9,6 +9,7 @@ it. See docs/PROTOCOL.md for how each part was recovered.
 from __future__ import annotations
 
 import logging
+import os
 import struct
 import time
 from dataclasses import dataclass
@@ -71,6 +72,9 @@ RETRYABLE_COMMANDS = frozenset(
 )
 READ_ATTEMPTS = 3
 
+# With this set in the environment, nothing that changes an ECU can be sent.
+READ_ONLY_ENV = "OPENPCLINK_READ_ONLY"
+
 ERR_UNSUPPORTED = 0x1B
 DEFAULT_TIMEOUT = 0.3
 _RESYNC_QUIET_S = 0.02
@@ -126,6 +130,8 @@ class Link:
     def request(self, cmd: int, payload: bytes = b"", timeout: float = DEFAULT_TIMEOUT) -> bytes:
         if cmd not in ALLOWED_COMMANDS:
             raise ForbiddenCommand(f"command 0x{cmd:02X} is not allowed")
+        if os.environ.get(READ_ONLY_ENV) and cmd not in RETRYABLE_COMMANDS:
+            raise ForbiddenCommand(f"read-only mode: command 0x{cmd:02X} was not sent")
         attempts = READ_ATTEMPTS if cmd in RETRYABLE_COMMANDS else 1
         for attempt in range(1, attempts + 1):
             try:

@@ -130,3 +130,16 @@ def test_descriptor_large_array_uses_extended_count():
 def test_malformed_descriptor_is_refused(blob):
     with pytest.raises(DescriptorError):
         parse_descriptor(blob, 100)
+
+
+@pytest.mark.parametrize("cmd", [p.CMD_WRITE_CONFIG, p.CMD_WRITE_SECTION2, p.CMD_STORE])
+def test_read_only_mode_never_sends_writes_or_store(monkeypatch, cmd):
+    monkeypatch.setenv(p.READ_ONLY_ENV, "1")
+    transport = Scripted()
+    with pytest.raises(p.ForbiddenCommand):
+        p.Link(transport).request(cmd, b"\0\0\0\1\0")
+    assert transport.sent == []
+
+
+def test_read_only_mode_allows_only_commands_that_cannot_change_the_ecu(monkeypatch):
+    assert p.RETRYABLE_COMMANDS == {0x00, 0x01, 0x03, 0x09, 0x0B, 0x0D, 0x16, 0x18, 0x1A, 0x32}

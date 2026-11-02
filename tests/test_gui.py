@@ -29,6 +29,17 @@ def database(tmp_path_factory):
     return Database.load(import_pclink(PROGRAM, tmp_path_factory.mktemp("db") / "db.json.gz"))
 
 
+_kept_windows = []
+
+
+def dispose(app, window):
+    """Tear down in a fixed order; Python's garbage collector must not pick the moment."""
+    window.close()
+    window.deleteLater()
+    _kept_windows.append(window)
+    app.processEvents()
+
+
 def pump(app, until, timeout=10.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -55,8 +66,9 @@ def session(app, database):
     window.connect_to(f"serial:{server.path}")
     assert pump(app, lambda: window.status_label.text() == "ONLINE"), "did not connect"
     yield app, window, sim
-    window.worker.ecu._dirty = False
-    window.close()
+    if window.worker.ecu:
+        window.worker.ecu._dirty = False
+    dispose(app, window)
     server.close()
 
 
@@ -67,6 +79,18 @@ def find_item(window, *path):
         item = next(candidate for candidate in items if candidate.text(0) == name)
         items = [item.child(i) for i in range(item.childCount())]
     return item
+
+
+def test_switching_forms_with_an_editor_focused_is_safe(session):
+    app, window, sim = session
+    window.tree.setCurrentItem(find_item(window, "Engine Protection", "RPM Limit"))
+    spin = next(e for e in window.form.editors.values() if isinstance(e, QtWidgets.QDoubleSpinBox))
+    spin.setFocus()
+    app.processEvents()
+    window.tree.setCurrentItem(find_item(window, "Configuration"))
+    for _ in range(20):
+        app.processEvents()
+    assert sim.writes == []
 
 
 def test_connects_and_builds_full_menu(session):
@@ -100,7 +124,7 @@ def test_table_shows_ecu_axis_breakpoints(session):
     app, window, _ = session
     item = window.database.parameter(2365)
     window.form.show_parameters([item])
-    grid = window.form.editors[2365]
+    grid = window.form.editors[2365].grid
     assert grid.rowCount() == 20 and grid.columnCount() == 22
     expected = window.worker.ecu.get_all(item.column_axis_id)[0]
     assert grid.horizontalHeaderItem(0).text() == f"{expected:g}"
@@ -155,7 +179,7 @@ def test_locked_ecu_hides_settings(app, database):
     assert window.tree.topLevelItemCount() == 0
     assert "Password protection" in window.placeholder.text()
     assert not window.store_action.isEnabled()
-    window.close()
+    dispose(app, window)
     server.close()
 
 
@@ -173,5 +197,82 @@ def test_connection_loss_goes_offline(app, database):
     server._thread.join()
     assert pump(app, lambda: window.status_label.text() == "OFFLINE", timeout=5)
     assert errors
-    window.close()
+    dispose(app, window)
     server.close()
+
+
+def test_table_keys_change_only_the_selected_cells(session):
+    from PySide6 import QtGui
+
+    app, window, sim = session
+    window.form.show_parameters([window.database.parameter(2365)])
+    editor = window.form.editors[2365]
+    editor.grid.setCurrentCell(2, 3)
+    assert editor.grid.currentItem().isSelected()
+    index = 2 * 22 + 3
+    before = window.worker.ecu.get(2365, index)
+    event = QtGui.QKeyEvent(QtCore.QEvent.Type.KeyPress, QtCore.Qt.Key.Key_Plus, QtCore.Qt.KeyboardModifier.NoModifier, "+")
+    app.sendEvent(editor.grid, event)
+    assert pump(app, lambda: sim.writes)
+    assert len(sim.writes) == 1
+    assert pump(app, lambda: window.worker.ecu.get(2365, index) > before)
+
+
+def test_live_cell_tracking_never_writes_to_the_ecu(session):
+    app, window, sim = session
+    window.form.show_parameters([window.database.parameter(2365)])
+    editor = window.form.editors[2365]
+    positions = [(0, 0), (1, 1), (2, 2)]
+    original = window.table_position
+    window.table_position = lambda *_args: positions.pop() if positions else (3, 3)
+    for _ in range(5):
+        editor.update_trace()
+    pump(app, lambda: False, timeout=0.3)
+    window.table_position = original
+    assert editor.trace == (3, 3)
+    assert sim.writes == []
+
+
+def test_settings_tree_starts_like_real_pclink(session):
+    _, window, _ = session
+    names = [window.tree.topLevelItem(i).text(0) for i in range(window.tree.topLevelItemCount())]
+    assert names[:4] == ["Configuration", "Fuel", "Ignition", "Engine Protection"]
+
+
+def test_runtime_tree_lists_live_values_and_adds_gauges(session):
+    app, window, _ = session
+    assert window.runtime_tree.topLevelItemCount() > 0
+    leaf = window.runtime_tree.topLevelItem(0)
+    while leaf.childCount():
+        leaf = leaf.child(0)
+    assert isinstance(leaf.data(0, QtCore.Qt.ItemDataRole.UserRole), int)
+    before = len(window.gauge_ids)
+    window._toggle_gauge(leaf, 0)
+    assert len(window.gauge_ids) == before + 1
+
+
+def test_offline_map_opens_edits_and_saves_without_any_ecu(app, database, tmp_path):
+    from openpclink.mapfile import MapFile
+    from tests.conftest import PROGRAM
+
+    window = MainWindow(database)
+    window.show_error = lambda message: pytest.fail(message)
+    window.load_map(PROGRAM / "Sample Maps" / "Xtreme default map.pclx")
+    assert pump(app, lambda: window.status_label.text() == "MAP FILE")
+    assert not window.store_action.isEnabled()
+    window.write(2365, 66.0, 0)
+    assert pump(app, lambda: "Unsaved" in window.unstored_label.text())
+    target = tmp_path / "edited.pclx"
+    window.save_map_to(target)
+    assert MapFile.load(target, database.map_key).entries[2365].values[0] == 66.0
+    dispose(app, window)
+
+
+def test_pc_logging_records_while_connected(session, tmp_path):
+    from openpclink.logfile import read_log
+
+    app, window, _ = session
+    window.start_logging(tmp_path / "log.csv")
+    assert pump(app, lambda: window.worker.logger and window.worker.logger.samples >= 3)
+    window.stop_logging()
+    assert len(read_log(tmp_path / "log.csv").time) >= 3

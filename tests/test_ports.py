@@ -44,6 +44,7 @@ def test_ftdi_is_configured_as_pclink_configures_it():
     device.open.assert_called_once_with(transports.FTDI_VID, 0x7068, serial=None)
     device.set_baudrate.assert_called_once_with(4_700_000, constrain=False)
     device.set_line_property.assert_called_once_with(8, 1, "N")
+    device.set_latency_timer.assert_called_once_with(16)
     assert _open_ftdi(False).set_baudrate.call_args.args[0] == 1_171_875
 
 

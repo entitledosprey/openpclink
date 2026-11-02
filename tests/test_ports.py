@@ -45,3 +45,24 @@ def test_ftdi_is_configured_as_pclink_configures_it():
     device.set_baudrate.assert_called_once_with(4_700_000, constrain=False)
     device.set_line_property.assert_called_once_with(8, 1, "N")
     assert _open_ftdi(False).set_baudrate.call_args.args[0] == 1_171_875
+
+
+def test_g4x_claimed_by_a_system_driver_is_offered_as_serial_at_both_rates():
+    ports = [_serial("/dev/cu.usbserial-1", 0x0403, 0x7069)]
+    assert _detect(ports, []) == ["serial:/dev/cu.usbserial-1@1171875", "serial:/dev/cu.usbserial-1@4700000"]
+
+
+def test_udev_rule_sorts_before_seat_late_so_uaccess_works():
+    from pathlib import Path
+
+    rules = list((Path(__file__).parent.parent / "packaging").glob("*.rules"))
+    assert [path.name for path in rules] == ["70-link-ecu.rules"]
+    assert rules[0].name < "73-seat-late.rules"
+
+
+def test_permission_error_explains_the_fix(monkeypatch):
+    error = PermissionError(13, "Access denied (insufficient permissions)")
+    monkeypatch.setattr(transports.sys, "platform", "linux")
+    assert "70-link-ecu.rules" in transports._ftdi_open_message(error)
+    monkeypatch.setattr(transports.sys, "platform", "darwin")
+    assert "sudo" in transports._ftdi_open_message(error)

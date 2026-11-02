@@ -49,6 +49,24 @@ class Transport(Protocol):
     def close(self) -> None: ...
 
 
+def _ftdi_open_message(exc: Exception) -> str:
+    message = f"cannot open Link USB device: {exc}"
+    if getattr(exc, "errno", None) != errno.EACCES and "Access denied" not in str(exc):
+        return message
+    if sys.platform == "darwin":
+        return (
+            f"{message}. Another driver has probably claimed the ECU. Unplug and replug it, then "
+            "look for a Link entry with a /dev/cu port in the connection list. If there is none, "
+            "run from a terminal with sudo: "
+            "sudo /Applications/OpenPCLink.app/Contents/MacOS/OpenPCLink"
+        )
+    return (
+        f"{message}. Your user lacks permission for the USB device. Install the rule in "
+        "packaging/70-link-ecu.rules (included in the .deb from version 0.1.1), then unplug and "
+        "replug the ECU."
+    )
+
+
 class SerialTransport:
     """G5 USB (CDC-ACM, needs no driver) and RS-232 ports."""
 
@@ -123,7 +141,7 @@ class FtdiTransport:
             self._ftdi.set_flowctrl("")
             self._ftdi.set_latency_timer(2)
         except (FtdiError, UsbToolsError, ValueError, OSError) as exc:
-            raise TransportError(f"cannot open Link USB device: {exc}") from exc
+            raise TransportError(_ftdi_open_message(exc)) from exc
 
     def write(self, data: bytes) -> int:
         try:
@@ -229,6 +247,13 @@ def list_ports(all_serial: bool = False) -> list[PortInfo]:
     for port in sorted(serial_ports.comports(), key=lambda p: p.device):
         if port.vid == G5_VID and port.pid == G5_PID:
             found.append(PortInfo(f"serial:{port.device}", f"Link G5 ECU ({port.device})"))
+        elif port.vid == FTDI_VID and port.pid in G4X_PIDS:
+            # A system driver has claimed it. The right rate depends on the chip,
+            # and only the matching one will get an answer.
+            for baud in (FTDI_X_BAUD, FT232H_BAUD):
+                found.append(
+                    PortInfo(f"serial:{port.device}@{baud}", f"Link G4X ECU ({port.device} at {baud} baud)")
+                )
         elif all_serial and port.vid is not None:
             found.append(PortInfo(f"serial:{port.device}", f"{port.description} ({port.device})"))
     try:

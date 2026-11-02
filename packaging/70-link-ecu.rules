@@ -1,0 +1,7 @@
+# Must sort before systemd's 73-seat-late.rules, or the uaccess tag has no effect.
+# Link G5 (USB CDC): let the logged-in user open it, and stop ModemManager
+# sending AT commands to an engine controller.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="a451", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
+# Link G4X (FTDI with private product IDs, driven through libusb).
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="706[89a-f]", TAG+="uaccess"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="706[89a-f]", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"

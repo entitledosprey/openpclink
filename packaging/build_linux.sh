@@ -16,7 +16,7 @@ docker run --rm --platform "linux/$arch" -v "$PWD:/repo:ro" -v "$PWD/dist:/out" 
     cp -r dist/OpenPCLink \$root/opt/openpclink
     ln -s /opt/openpclink/OpenPCLink \$root/usr/bin/openpclink
     cp packaging/openpclink.desktop \$root/usr/share/applications/
-    cp packaging/99-link-ecu.rules \$root/usr/lib/udev/rules.d/
+    cp packaging/70-link-ecu.rules \$root/usr/lib/udev/rules.d/
     printf 'Package: openpclink\nVersion: %s\nArchitecture: $arch\nMaintainer: local build\nDepends: libegl1, libgl1, libxkbcommon0, libdbus-1-3, libfontconfig1, libglib2.0-0\nDescription: Unofficial tuning client for Link ECUs\n' \"\$version\" > \$root/DEBIAN/control
     printf '#!/bin/sh\nudevadm control --reload-rules 2>/dev/null || true\nudevadm trigger 2>/dev/null || true\n' > \$root/DEBIAN/postinst
     chmod 755 \$root/DEBIAN/postinst

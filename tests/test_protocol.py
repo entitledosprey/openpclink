@@ -67,6 +67,12 @@ def test_no_reply_raises():
         p.Link(Scripted()).request(0x03)
 
 
+def test_truncation_error_says_how_much_arrived():
+    reply = p.build_reply(0x5B, 0x03, b"\x00\x01")[:-3]
+    with pytest.raises(p.ProtocolError, match=r"got 1 of 4 bytes for command 0x03"):
+        p.Link(Scripted(reply))._exchange(0x03, b"", 0.1)
+
+
 def _entry(data_id, info, *rest, read_only=False):
     head = struct.pack(">HB", (data_id << 2) | (2 if read_only else 0), info)
     return head + b"".join(rest)

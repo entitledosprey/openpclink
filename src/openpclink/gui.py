@@ -10,7 +10,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from . import __version__
 from .database import Database, DatabaseMissing, Parameter
-from .ecu import SECRET_IDS, Ecu, EcuProtected, WriteMismatch, WriteRefused
+from .ecu import SECRET_IDS, Ecu, EcuProtected, StoreUnconfirmed, WriteMismatch, WriteRefused
+from .diagnostics import enable_log_file
 from .importer import ImportFailed, import_pclink
 from .protocol import ProtocolError
 from .transports import TransportError, list_ports, open_transport
@@ -79,8 +80,12 @@ class Worker(QtCore.QThread):
         elif name == "set_string":
             self._guarded(lambda: self.ecu.set_string(args[0], args[1]), args[0], 0)
         elif name == "store":
-            self.ecu.store()
-            self.stored.emit()
+            try:
+                self.ecu.store()
+            except StoreUnconfirmed as exc:
+                self.failed.emit(str(exc))
+            else:
+                self.stored.emit()
 
     def _guarded(self, action, data_id: int, index: int) -> None:
         try:
@@ -577,6 +582,7 @@ def _load_database(parent: QtWidgets.QWidget | None = None) -> Database | None:
 
 
 def main() -> int:
+    enable_log_file()
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName("OpenPCLink")
     app.setApplicationVersion(__version__)

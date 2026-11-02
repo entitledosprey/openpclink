@@ -8,7 +8,9 @@ it. See docs/PROTOCOL.md for how each part was recovered.
 """
 from __future__ import annotations
 
+import logging
 import struct
+import time
 from dataclasses import dataclass
 
 from .transports import Transport
@@ -51,8 +53,30 @@ ALLOWED_COMMANDS = frozenset(
     }
 )
 
+# Safe to repeat after a lost or damaged reply. Writes and Store are not here:
+# a write is settled by reading back, and a Store is never repeated unasked.
+RETRYABLE_COMMANDS = frozenset(
+    {
+        CMD_READ_CONFIG,
+        CMD_READ_DESCRIPTOR_LEGACY,
+        CMD_STATE,
+        CMD_POLL_RUNTIME,
+        CMD_MEMORY_INFO,
+        CMD_READ_DESCRIPTOR,
+        CMD_FIRMWARE_INFO,
+        CMD_BOOT_INFO,
+        CMD_IDENTITY,
+        CMD_READ_SECTION2,
+    }
+)
+READ_ATTEMPTS = 3
+
 ERR_UNSUPPORTED = 0x1B
 DEFAULT_TIMEOUT = 0.3
+_RESYNC_QUIET_S = 0.02
+_RESYNC_LIMIT_S = 0.5
+
+log = logging.getLogger("openpclink.protocol")
 
 
 class ProtocolError(Exception):
@@ -102,6 +126,26 @@ class Link:
     def request(self, cmd: int, payload: bytes = b"", timeout: float = DEFAULT_TIMEOUT) -> bytes:
         if cmd not in ALLOWED_COMMANDS:
             raise ForbiddenCommand(f"command 0x{cmd:02X} is not allowed")
+        attempts = READ_ATTEMPTS if cmd in RETRYABLE_COMMANDS else 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._exchange(cmd, payload, timeout)
+            except EcuError:
+                raise
+            except ProtocolError as exc:
+                log.warning("command 0x%02X attempt %d/%d: %s", cmd, attempt, attempts, exc)
+                self._resync()
+                if attempt == attempts:
+                    raise
+        raise AssertionError("unreachable")
+
+    def _resync(self) -> None:
+        """Wait for the line to go quiet, so a late reply is not read as the next one."""
+        deadline = time.monotonic() + _RESYNC_LIMIT_S
+        while time.monotonic() < deadline and self.transport.read(4096, _RESYNC_QUIET_S):
+            pass
+
+    def _exchange(self, cmd: int, payload: bytes, timeout: float) -> bytes:
         self.transport.purge()
         request = build_request(self.addr, cmd, payload)
         if self.transport.write(request) != len(request):
@@ -117,14 +161,16 @@ class Link:
     def _read_reply(self, timeout: float) -> tuple[int, bytes]:
         header = self.transport.read(6, timeout)
         if len(header) != 6:
-            raise ProtocolError("no reply from ECU")
+            raise ProtocolError(f"no reply from ECU (got {len(header)} of 6 header bytes)")
         addr, marker, cmd, length = struct.unpack(">BBHH", header)
         if addr != self.addr or marker not in (0x5A, 0x01):
             self.transport.purge()
             raise ProtocolError(f"bad reply header {header.hex()}")
         rest = self.transport.read(length, timeout)
         if len(rest) != length:
-            raise ProtocolError("truncated reply from ECU")
+            raise ProtocolError(
+                f"truncated reply from ECU (got {len(rest)} of {length} bytes for command 0x{cmd:02X})"
+            )
         if crc16(header + rest) != 0:
             raise ProtocolError("reply failed CRC check")
         return cmd, rest[:-2]

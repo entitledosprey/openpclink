@@ -43,6 +43,10 @@ class WriteMismatch(Exception):
     """The ECU did not hold the value it was sent."""
 
 
+class StoreUnconfirmed(Exception):
+    """The ECU's reply to Store was lost, so it may or may not have saved."""
+
+
 @dataclass(frozen=True)
 class EcuInfo:
     firmware: str
@@ -330,9 +334,14 @@ class Ecu:
         for start in range(0, len(data), limit):
             chunk = data[start : start + limit]
             offset = absolute + start - base
-            body = self.link.request(cmd, struct.pack(">HH", offset, len(chunk)) + chunk)
             at = absolute + start
             self._dirty = True
+            try:
+                body = self.link.request(cmd, struct.pack(">HH", offset, len(chunk)) + chunk)
+            except p.EcuError:
+                raise
+            except p.ProtocolError:
+                body = b""  # The reply was lost; the read-back below decides.
             if body[: len(chunk)] == chunk:
                 self.memory[at : at + len(chunk)] = chunk
                 continue
@@ -350,7 +359,15 @@ class Ecu:
 
     def store(self) -> None:
         """Make live changes permanent in the ECU's flash."""
-        self.link.request(p.CMD_STORE, timeout=STORE_TIMEOUT)
+        try:
+            self.link.request(p.CMD_STORE, timeout=STORE_TIMEOUT)
+        except p.EcuError:
+            raise
+        except p.ProtocolError as exc:
+            raise StoreUnconfirmed(
+                "The ECU did not confirm the Store, so it may not have saved. Changes are still "
+                f"live. Store again before powering off. ({exc})"
+            ) from exc
         self.reload()
         self._dirty = False
 

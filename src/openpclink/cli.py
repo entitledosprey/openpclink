@@ -7,7 +7,8 @@ import time
 from pathlib import Path
 
 from .database import Database, DatabaseMissing
-from .ecu import Ecu, EcuProtected, WriteMismatch, WriteRefused
+from .diagnostics import enable_log_file
+from .ecu import Ecu, EcuProtected, StoreUnconfirmed, WriteMismatch, WriteRefused
 from .importer import ImportFailed, import_pclink
 from .protocol import ProtocolError
 from .sim import PtyServer, SimEcu, UdpServer
@@ -229,11 +230,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    enable_log_file()
     try:
         args.handler(args)
     except (
         CliError, DatabaseMissing, EcuProtected, ImportFailed, KeyError, OSError, ProtocolError,
-        TransportError, ValueError, WriteMismatch, WriteRefused,
+        StoreUnconfirmed, TransportError, ValueError, WriteMismatch, WriteRefused,
     ) as exc:
         print(f"error: {exc.args[0] if exc.args else exc}", file=sys.stderr)
         return 1

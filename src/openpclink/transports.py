@@ -62,7 +62,7 @@ def _ftdi_open_message(exc: Exception) -> str:
         )
     return (
         f"{message}. Your user lacks permission for the USB device. Install the rule in "
-        "packaging/70-link-ecu.rules (included in the .deb from version 0.1.1), then unplug and "
+        "packaging/70-link-ecu.rules (included in the .deb from version 0.1.1 on), then unplug and "
         "replug the ECU."
     )
 

@@ -1,0 +1,11 @@
+# Reverse-engineering workspace and anything derived from Link's installer.
+work/
+data/
+*.exe
+*.pclx
+*.pcl5
+build/
+dist/
+.venv/
+__pycache__/
+*.egg-info/

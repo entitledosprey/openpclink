@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=OpenPCLink
+Comment=Unofficial tuning client for Link ECUs
+Exec=/usr/bin/openpclink
+Terminal=false
+Categories=Utility;Engineering;

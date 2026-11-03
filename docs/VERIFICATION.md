@@ -26,17 +26,23 @@ A rare truncated poll (`got 11 of 1954`) was seen once in the GUI and recovered 
 | Write replies are an exact echo of the data | Confirmed, as the simulator assumed |
 | Reverted: all 58,033 config bytes match the snapshot | Pass, 0 differences |
 | Text change repeated through the packaged 0.2.0 Linux build (unpacked `.tar.gz`), reverted | Pass |
+| Same change through the `.deb` installed with `apt` on Ubuntu 26.04, reverted | Pass, 0 tune bytes differ |
+| Tune unchanged after a power cycle and an engine start | Pass, only the ECU's statistics counters moved |
 
-**Open question:** a full read straight after that packaged-build test showed 2 bytes differing from the snapshot.
-Five further full reads over the next few seconds showed 0 differences. Which bytes they were was not captured, so
-the cause is unknown. No Store was sent, so nothing reached flash. A power cycle reloads from flash.
+**Open question:** a full read straight after the unpacked-build test showed 2 bytes differing from the snapshot, and
+five further reads showed none. Which bytes they were was not captured, so the cause is unknown. Later, Engine
+Running Time and Num of Starts were seen to change by themselves, so comparisons now ignore statistics, but those
+changes persisted and that earlier one did not, so this is not a proven explanation.
+
+**Open issue:** with the GUI connected to this ECU, polls were cut short every few seconds (for example `1759 of 1954`
+bytes), and retries recovered them. The unpaced soak without a GUI had no such failures. The cause is not confirmed.
 
 ## Not verified
 
 - **Store on real hardware.** It was deliberately not run on this car. It rests on the real PCLink capture.
 - Writes to bitfields and tables on real hardware (byte-compared with real PCLink, not run on the car).
 - Writing with the engine running, or through the GUI on real hardware.
-- G5 USB, serial and WiFi on real hardware.
+- G5 USB, serial and WiFi on real hardware, and any Mac with a real ECU.
 - That displayed values match Windows PCLink on the same ECU, side by side. The Wine check is close to this,
   but used a saved copy.
 

@@ -61,6 +61,8 @@ def session(app, database):
     window.show()
     window.errors = []
     window.show_error = window.errors.append
+    window.related_asked = []
+    window.confirm_related = lambda changes: (window.related_asked.append(changes), False)[1]
     window.worker.failed.disconnect()
     window.worker.failed.connect(window.show_error)
     window.connect_to(f"serial:{server.path}")
@@ -83,11 +85,11 @@ def find_item(window, *path):
 
 def test_switching_forms_with_an_editor_focused_is_safe(session):
     app, window, sim = session
-    window.tree.setCurrentItem(find_item(window, "Engine Protection", "RPM Limit"))
-    spin = next(e for e in window.form.editors.values() if isinstance(e, QtWidgets.QDoubleSpinBox))
+    window.tree.setCurrentItem(find_item(window, "Configuration"))
+    spin = next(e for e in window.form.editors.values() if isinstance(e, (QtWidgets.QDoubleSpinBox, QtWidgets.QComboBox)))
     spin.setFocus()
     app.processEvents()
-    window.tree.setCurrentItem(find_item(window, "Configuration"))
+    window.tree.setCurrentItem(find_item(window, "Engine Protection", "RPM Limit"))
     for _ in range(20):
         app.processEvents()
     assert sim.writes == []
@@ -133,9 +135,8 @@ def test_table_shows_ecu_axis_breakpoints(session):
 
 def test_moving_focus_past_a_field_writes_nothing(session):
     app, window, sim = session
-    window.tree.setCurrentItem(find_item(window, "Engine Protection", "RPM Limit"))
+    window.form.show_parameters([window.database.parameter(i) for i in (1601, 2319, 1878)])
     spins = [e for e in window.form.editors.values() if isinstance(e, QtWidgets.QDoubleSpinBox)]
-    assert spins
     for spin in spins:
         spin.editingFinished.emit()
     pump(app, lambda: False, timeout=0.3)
@@ -298,3 +299,28 @@ def test_gauge_needle_pins_at_the_ends_of_its_range():
     assert gauge.needle_fraction() == 1.0
     gauge.set_value(-5, "-5")
     assert gauge.needle_fraction() == 0.0
+
+
+def _captions(window):
+    return [window.database.parameter(i).caption for i in window.form.editors]
+
+
+def test_pclinks_rules_decide_what_the_form_shows_like_the_real_program(session):
+    """Real PCLink 7.8.2, same map: only the mode when OFF, then these three with Ignition %cut."""
+    app, window, sim = session
+    assert window.worker.rules is not None
+    window.tree.setCurrentItem(find_item(window, "Engine Protection", "RPM Limit"))
+    assert _captions(window) == ["RPM Limit Mode"]
+    combo = window.form.editors[2754]
+    combo.setCurrentIndex(1)
+    combo.activated.emit(1)
+    assert pump(app, lambda: _captions(window) == ["RPM Limit Mode", "Dual Tables", "Advanced Mode"])
+
+
+def test_related_changes_are_asked_about_and_not_sent_unless_approved(session):
+    app, window, sim = session
+    window.write(2754, 1, 0)
+    assert pump(app, lambda: window.related_asked)
+    assert [(c.data_id, c.value) for c in window.related_asked[0]] == [(3460, 56.0)]
+    pump(app, lambda: False, timeout=0.3)
+    assert sim.writes == [bytes.fromhex("37b3000120")]

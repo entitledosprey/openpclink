@@ -118,6 +118,10 @@ def import_pclink(source: Path, destination: Path | None = None) -> Path:
         }
         destination.parent.mkdir(parents=True, exist_ok=True)
         _extract_help(folder, destination.with_name("pclink-help.json.gz"))
+        rules = folder / "D_menu.dll"
+        if rules.exists():
+            with gzip.open(destination.with_name("pclink-rules.dll.gz"), "wb") as out:
+                out.write(rules.read_bytes())
     finally:
         if temp:
             shutil.rmtree(temp, ignore_errors=True)
@@ -165,3 +169,13 @@ def _clean_help_page(html: str) -> str:
     html = re.sub(r"(?is)<img\b[^>]*>", "", html)
     html = re.sub(r'(?is)<div id="header".*?</div>\s*</div>', "", html, count=1)
     return html.strip()
+
+
+def load_rules_dll() -> bytes | None:
+    """PCLink's rules DLL from the user's import, if there is one."""
+    bundled = bundled_db_path()
+    for path in (default_db_path().with_name("pclink-rules.dll.gz"), bundled and bundled.with_name("pclink-rules.dll.gz")):
+        if path and path.exists():
+            with gzip.open(path, "rb") as stream:
+                return stream.read()
+    return None

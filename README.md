@@ -94,17 +94,11 @@ PC logging to CSV with a plot viewer, and Link's manual as text.
 **Deliberately excluded, because they can brick or wipe an ECU and cannot be tested safely:** firmware
 updates, Restore to Factory Settings, setting or removing passwords, ECU unlock codes.
 
-**Not built yet:**
+**Not built yet:** most of PCLink's calibration, logging and display tools. [docs/PARITY.md](docs/PARITY.md) is the
+full checklist.
 
-- `D_menu.dll`'s rules (about 160,000 decompiled lines). PCLink uses this DLL to hide dependent settings, run
-  cross-field checks, and **change related settings for you**, such as allocating a table when a feature is
-  switched on. None of that happens here. **Changing a mode or function setting here can leave related settings
-  unset that PCLink would have set. Until this is ported, change those in official PCLink.**
-- Loading a map file into an ECU.
-- ECU log download and setup, trigger scope, Clear Statistics and fault code clearing, TPS and MAP calibration wizards.
-- Guided tools: CAN setup dialog (CAN settings are in the menus), Quick Tune, Quick Trim, injector and base-timing wizards.
-- Display: other gauge styles, layouts and pop-outs, mixture map, vehicle plan, engine timing diagram, XY plots, audio.
-- PCLink's own log files, drag-run and log-section tools, unit selection (metric only), colour themes.
-- G5 comms-processor settings (parameters from 10000, such as WiFi).
+**Rules:** the app runs PCLink's own `D_menu.dll` from your copy in a CPU emulator, for dependent hiding and messages.
+When the rules want a related setting changed, the app asks you first. That has only been compared with real PCLink on
+one form, so until wider comparison is done, **keep making mode and function changes in official PCLink**.
 
 See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the protocol.

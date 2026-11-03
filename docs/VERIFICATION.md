@@ -70,10 +70,10 @@ contents of write replies (handled by reading back if not an echo), timing, and 
 
 ## Known gaps
 
-- `D_menu.dll` is not ported, so forms can show settings PCLink hides and invalid combinations are not caught.
-  Its `ValueChanged` also writes related settings: for example, parameter 2754 (RPM Limit Mode) has code that
-  allocates or frees table number 0x38 in the table-allocation list. This client does not do that, so a mode changed
-  here may not match the result of the same change in PCLink.
+- `D_menu.dll` now runs in an emulator, and its hiding matches real PCLink on the RPM Limit form in both states. Other
+  forms have not been compared. It also asks for related changes: 2754 (RPM Limit Mode) set to 1 asks for 3460 = 56, a
+  table allocation, yet the capture of real PCLink making that change showed no such write. The reason is not yet
+  known, so the app asks before applying these.
 - Only 3 engine-running locks were observed, on one form. PCLink's rule was not recovered, and other
   settings may be padlocked there but **writable here with the engine running**.
 - Parameter limits come from Link's database; PCLink may apply further checks in its forms that were

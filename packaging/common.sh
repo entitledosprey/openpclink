@@ -13,7 +13,7 @@ PY
         --add-data "src/openpclink/data:openpclink/data" \
         --hidden-import openpclink.cli --hidden-import openpclink.gui --hidden-import openpclink.link_helper \
         --hidden-import serial.tools.list_ports \
-        --collect-submodules pyftdi --collect-submodules usb \
+        --collect-submodules pyftdi --collect-submodules usb --collect-all unicorn \
         --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.QtWebEngineWidgets \
         --exclude-module PySide6.QtQml --exclude-module PySide6.QtQuick --exclude-module PySide6.Qt3DCore \
         --exclude-module PySide6.QtMultimedia --exclude-module PySide6.QtPdf --exclude-module tkinter \

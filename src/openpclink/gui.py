@@ -14,10 +14,11 @@ from .crypto import BadContainer, ProtectedFile
 from .database import MENU_ORDER, Database, DatabaseMissing, HelpManual, Parameter
 from .diagnostics import enable_log_file
 from .ecu import ENGINE_SPEED_ID, SECRET_IDS, Ecu, EcuProtected, StoreUnconfirmed, WriteMismatch, WriteRefused
-from .importer import ImportFailed, import_pclink
+from .importer import ImportFailed, import_pclink, load_rules_dll
 from .logfile import PcLogger, read_log
 from .mapfile import MapError, MapFile, OfflineEcu, compare
 from .protocol import READ_ONLY_ENV, ForbiddenCommand, ProtocolError
+from .rules import FLAG_STARTUP, RulesEngine, RulesError
 from .views import GaugePanel, LogViewer, SurfaceView, axis_cell, heat_colour, used_axis_length
 from .transports import TransportError, list_ports, open_transport
 
@@ -33,9 +34,14 @@ class Worker(QtCore.QThread):
     wrote = QtCore.Signal(int, int)
     failed = QtCore.Signal(str)
     stored = QtCore.Signal()
+    related = QtCore.Signal(list)
+    rules_messages = QtCore.Signal(list)
+    rules_status = QtCore.Signal(str)
+    visibility_changed = QtCore.Signal()
 
     def __init__(self, database: Database) -> None:
         super().__init__()
+        self.rules: RulesEngine | None = None
         self.database = database
         self.ecu: Ecu | OfflineEcu | None = None
         self.jobs: queue.Queue = queue.Queue()
@@ -77,10 +83,13 @@ class Worker(QtCore.QThread):
                 ecu.close()
                 raise
             self.ecu = ecu
+            if not ecu.is_protected:
+                self._start_rules()
             self.connected.emit(info, ecu.is_protected)
         elif name == "offline":
             self._close()
             self.ecu = args[0]
+            self._start_rules()
             self.connected.emit(self.ecu.info, False)
         elif name == "disconnect":
             self._close()
@@ -88,7 +97,7 @@ class Worker(QtCore.QThread):
         elif self.ecu is None:
             self.failed.emit("Not connected to an ECU.")
         elif name == "set":
-            self._guarded(lambda: self.ecu.set(args[0], args[1], args[2]), args[0], args[2])
+            self._set_value(*args)
         elif name == "set_string":
             self._guarded(lambda: self.ecu.set_string(args[0], args[1]), args[0], 0)
         elif name == "store":
@@ -98,6 +107,60 @@ class Worker(QtCore.QThread):
                 self.failed.emit(str(exc))
             else:
                 self.stored.emit()
+
+    def _rules_read(self, data_id: int, index: int = 0) -> float:
+        try:
+            return self.ecu.get(data_id, index)
+        except (EcuProtected, IndexError, KeyError, TypeError, ValueError):
+            return 0.0  # The rules also ask about text and reserved parameters.
+
+    def _start_rules(self) -> None:
+        """Run PCLink's own rules DLL over the current tune, as PCLink does on connecting."""
+        self.rules = None
+        dll = load_rules_dll()
+        if dll is None:
+            self.rules_status.emit("PCLink's rules DLL was not imported, so dependent settings are not hidden.")
+            return
+        database = self.database
+        try:
+            engine = RulesEngine(
+                dll,
+                self._rules_read,
+                lambda data_id: self.ecu is not None and data_id in self.ecu.table,
+                lambda data_id: database.known(data_id) and database.parameter(data_id).visible,
+            )
+            for data_id, loc in sorted(self.ecu.table.items()):
+                if data_id in SECRET_IDS or loc.is_string or not database.known(data_id) or data_id == 0:
+                    continue
+                if loc.count > 1 and not loc.is_bitfield:
+                    continue
+                value = self._rules_read(data_id)
+                engine.value_changed(data_id, value, value, FLAG_STARTUP)
+            engine.take_messages()
+            self.rules = engine
+        except (RulesError, ImportError, ValueError, OSError) as exc:
+            self.rules_status.emit(f"PCLink's rules could not run, so dependent settings are not hidden: {exc}")
+
+    def _set_value(self, data_id: int, value: float, index: int) -> None:
+        old = self._rules_read(data_id, index)
+        self._guarded(lambda: self.ecu.set(data_id, value, index), data_id, index)
+        new = self._rules_read(data_id, index)
+        if self.rules is None or new == old or index != 0:
+            return
+        try:
+            self.rules.visibility_changed = False
+            changes = list(self.rules.value_changed(data_id, old, new))
+            messages = self.rules.take_messages()
+        except RulesError as exc:
+            self.rules = None
+            self.rules_status.emit(f"PCLink's rules stopped, so dependent settings are no longer hidden: {exc}")
+            return
+        if messages:
+            self.rules_messages.emit(messages)
+        if self.rules.visibility_changed:
+            self.visibility_changed.emit()
+        if changes:
+            self.related.emit(changes)
 
     def _guarded(self, action, data_id: int, index: int) -> None:
         try:
@@ -110,6 +173,7 @@ class Worker(QtCore.QThread):
         if self.logger:
             self.logger.close()
             self.logger = None
+        self.rules = None
         if self.ecu:
             self.ecu.close()
             self.ecu = None
@@ -548,6 +612,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.wrote.connect(self._on_wrote)
         self.worker.failed.connect(self.show_error)
         self.worker.stored.connect(self._on_stored)
+        self.worker.related.connect(self._on_related)
+        self.worker.rules_messages.connect(lambda messages: self.show_error("\n\n".join(messages)))
+        self.worker.rules_status.connect(self.statusBar().showMessage)
+        self.worker.visibility_changed.connect(self._on_visibility_changed)
         self.worker.start()
 
     def _build_actions(self) -> None:
@@ -640,7 +708,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def parameter_visible(self, data_id: int) -> bool:
         ecu = self.worker.ecu
-        return ecu is not None and self.database.is_visible(data_id, ecu.info.link_id, self._option_of)
+        if ecu is None or not self.database.is_visible(data_id, ecu.info.link_id, self._option_of):
+            return False
+        rules = self.worker.rules
+        return rules is None or rules.visible(data_id)
 
     def _option_of(self, data_id: int) -> int | None:
         ecu = self.worker.ecu
@@ -656,15 +727,21 @@ class MainWindow(QtWidgets.QMainWindow):
         return ecu.table[data_id].offset < ecu.info.runtime_size
 
     def _groups(self, live: bool) -> dict[tuple[str, ...], list[int]]:
+        """Menu entries with something to show, each keeping all its parameters.
+
+        Hidden ones are kept so the form can show them when the rules reveal them.
+        """
         ecu = self.worker.ecu
         groups: dict[tuple[str, ...], list[int]] = defaultdict(list)
         for data_id in ecu.table:
             if data_id in SECRET_IDS or not self.database.known(data_id) or self._is_live(data_id) != live:
                 continue
             parameter = self.database.parameter(data_id)
-            if parameter.path and self.database.is_visible(data_id, ecu.info.link_id, self._option_of):
+            if parameter.path:
                 groups[parameter.path].append(data_id)
-        return groups
+        return {
+            path: ids for path, ids in groups.items() if any(self.parameter_visible(i) for i in ids)
+        }
 
     @staticmethod
     def _fill_tree(tree: QtWidgets.QTreeWidget, groups, sort_key) -> None:
@@ -698,7 +775,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 prefix = path[:depth]
                 if prefix not in nodes:
                     nodes[prefix] = QtWidgets.QTreeWidgetItem(nodes.get(prefix[:-1]) or tree, [prefix[-1]])
-            for data_id in sorted(groups[path], key=lambda i: self.database.parameter(i).caption):
+            visible = [i for i in groups[path] if self.parameter_visible(i)]
+            for data_id in sorted(visible, key=lambda i: self.database.parameter(i).caption):
                 item = QtWidgets.QTreeWidgetItem(nodes[path], [self.database.parameter(data_id).caption])
                 item.setData(0, ID_ROLE, data_id)
 
@@ -800,6 +878,49 @@ class MainWindow(QtWidgets.QMainWindow):
         return f"{value:.{decimals}f} {parameter.units}".strip()
 
     # ---- writing ----------------------------------------------------------
+
+    def _on_visibility_changed(self) -> None:
+        current = self.tree.currentItem()
+        path = []
+        while current is not None:
+            path.insert(0, current.text(0))
+            current = current.parent()
+        parameters = self.form.parameters
+        self._build_tree()
+        self.form.show_parameters(parameters)
+        self._reselect(path)
+
+    def _reselect(self, path: list[str]) -> None:
+        items = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())]
+        found = None
+        for name in path:
+            found = next((item for item in items if item.text(0) == name), None)
+            if found is None:
+                return
+            found.setExpanded(True)
+            items = [found.child(i) for i in range(found.childCount())]
+        if found is not None:
+            self.tree.blockSignals(True)
+            self.tree.setCurrentItem(found)
+            self.tree.blockSignals(False)
+
+    def describe_change(self, change) -> str:
+        known = self.database.known(change.data_id)
+        name = self.database.parameter(change.data_id).caption if known else f"Parameter {change.data_id}"
+        return f"{name}: {change.value:g}"
+
+    def confirm_related(self, changes: list) -> bool:
+        listing = "\n".join(self.describe_change(change) for change in changes)
+        answer = QtWidgets.QMessageBox.question(
+            self, "Related settings",
+            f"PCLink would also change these settings alongside your edit:\n\n{listing}\n\nApply them?",
+        )
+        return answer == QtWidgets.QMessageBox.StandardButton.Yes
+
+    def _on_related(self, changes: list) -> None:
+        if self.confirm_related(changes):
+            for change in changes:
+                self.write(change.data_id, change.value, change.index)
 
     def choose_option(self, data_id: int, option: int) -> None:
         warning = self.database.warning_for(data_id, option)

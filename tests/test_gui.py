@@ -337,3 +337,17 @@ def test_a_rules_warning_reaches_the_user_when_a_change_triggers_it(session):
 def test_rules_warnings_are_silent_while_connecting(session):
     _, window, _ = session
     assert window.errors == []
+
+
+def test_status_window_shows_the_active_fault_and_sends_nothing(session):
+    app, window, sim = session
+    window.show_status()
+    status = window.status_window
+    assert status.fault.text() == "No fault codes."
+    code = window.database.parameter(1162).options[3]
+    at = sim.offsets[1162]
+    location = window.worker.ecu.table[1162]
+    sim.memory[at] = (sim.memory[at] & ~location.mask & 0xFF) | ((3 << location.shift) & location.mask)
+    assert pump(app, lambda: code in status.fault.text())
+    assert sim.writes == []
+    status.close()

@@ -353,6 +353,69 @@ class ParameterForm(QtWidgets.QWidget):
             editor.blockSignals(False)
 
 
+class StatusWindow(QtWidgets.QWidget):
+    """The ECU's status, led by its fault code. Read-only, and it updates live."""
+
+    FAULT_CODE_ID = 1162
+    FAULT_COUNT_ID = 1186
+
+    def __init__(self, window: "MainWindow") -> None:
+        super().__init__()
+        self.window_ = window
+        self.setWindowTitle("ECU Status")
+        self.resize(560, 620)
+        self.fault = QtWidgets.QLabel()
+        self.fault.setWordWrap(True)
+        self.table = QtWidgets.QTableWidget(0, 2)
+        self.table.setHorizontalHeaderLabels(["Status", "Value"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.verticalHeader().hide()
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(self.fault)
+        layout.addWidget(self.table)
+        database, ecu = window.database, window.worker.ecu
+        self.ids = [
+            data_id
+            for data_id in database.ids
+            if data_id in ecu.table
+            and data_id not in SECRET_IDS
+            and database.parameter(data_id).path[:1] == ("ECU Status",)
+            and window.parameter_visible(data_id)
+        ]
+        self.table.setRowCount(len(self.ids))
+        for row, data_id in enumerate(self.ids):
+            self.table.setItem(row, 0, QtWidgets.QTableWidgetItem(database.parameter(data_id).caption))
+            self.table.setItem(row, 1, QtWidgets.QTableWidgetItem(""))
+        self.table.resizeColumnToContents(0)
+        self.refresh()
+
+    def _text(self, data_id: int) -> str:
+        window = self.window_
+        parameter = window.database.parameter(data_id)
+        decimals = parameter.decimals if parameter.decimals is not None else 0
+        return window._format_live(parameter, window.worker.ecu.get(data_id), decimals, window.units_of(parameter))
+
+    def refresh(self) -> None:
+        ecu = self.window_.worker.ecu
+        if ecu is None:
+            self.fault.setText("Not connected.")
+            return
+        for row, data_id in enumerate(self.ids):
+            self.table.item(row, 1).setText(self._text(data_id))
+        self._show_fault(ecu)
+
+    def _show_fault(self, ecu) -> None:
+        if self.FAULT_CODE_ID not in ecu.table:
+            self.fault.setText("This ECU does not report fault codes here.")
+            return
+        code = int(ecu.get(self.FAULT_CODE_ID))
+        count = int(ecu.get(self.FAULT_COUNT_ID)) if self.FAULT_COUNT_ID in ecu.table else None
+        counted = f" ({count} active)" if count is not None else ""
+        self.fault.setText(f"Fault code: {self._text(self.FAULT_CODE_ID)}{counted}" if code else "No fault codes.")
+        self.fault.setStyleSheet("color:#a12626;font-weight:bold" if code else "color:#1b7f3b;font-weight:bold")
+
+
 class TableEditor(QtWidgets.QWidget):
     """A tuning table: heat map, live position, bulk edits, axes and 3D view."""
 
@@ -552,6 +615,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1200, 760)
         self.protected = False
         self._uri = ""
+        self.status_window: StatusWindow | None = None
 
         self.search = QtWidgets.QLineEdit()
         self.search.setPlaceholderText("Search parameters")
@@ -641,6 +705,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ecu_menu.addAction(self.connect_action)
         ecu_menu.addAction(self.store_action)
         ecu_menu.addAction(backup)
+        ecu_menu.addAction(QtGui.QAction("ECU Status and Fault Codes…", self, triggered=self.show_status))
         toolbar = self.addToolBar("ECU")
         toolbar.setMovable(False)
         toolbar.addAction(self.connect_action)
@@ -914,10 +979,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self.gauges.setItem(row, 1, QtWidgets.QTableWidgetItem(""))
         self.gauges.resizeColumnToContents(0)
 
+    def show_status(self) -> None:
+        if not self.worker.ecu:
+            self.show_error("Connect to an ECU or open a map first.")
+            return
+        self.status_window = StatusWindow(self)
+        self.status_window.show()
+
     def _on_runtime(self) -> None:
         ecu = self.worker.ecu
         if ecu is None:
             return
+        if self.status_window is not None and self.status_window.isVisible():
+            self.status_window.refresh()
         for row, data_id in enumerate(self.gauge_ids):
             parameter = self.database.parameter(data_id)
             decimals = parameter.decimals if parameter.decimals is not None else 1

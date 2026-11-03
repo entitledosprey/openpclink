@@ -12,7 +12,8 @@ Taken from the real program's menus, source modules and strings. Status means wh
 | Change settings live | Done: car (text, number); sim and PCLink bytes (option, table) |
 | Store to ECU | Built: PCLink capture; not run on the car |
 | Undo Short Term Changes, Load from ECU, Download to ECU | Missing |
-| Clear Fault Codes, Update and Clear Statistics | Missing (viewing is done) |
+| ECU status and fault codes window | Done: sim |
+| Clear Fault Codes, Update and Clear Statistics | Missing |
 | ECU log setup and download | Missing |
 | CAN setup dialog, CAN device, keypad and lambda forms | Missing (settings are in the menus) |
 | TPS setup, MAP sensor and Baro calibration, base timing, injection setup | Missing |

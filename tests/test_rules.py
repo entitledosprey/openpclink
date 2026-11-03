@@ -2,7 +2,7 @@
 import pytest
 
 from openpclink.database import Database
-from openpclink.importer import import_pclink, load_rules_dll
+from openpclink.importer import import_pclink
 from openpclink.mapfile import MapFile
 from openpclink.rules import FLAG_STARTUP, RulesEngine
 
@@ -77,6 +77,11 @@ def test_a_dll_it_cannot_load_is_reported():
         RulesEngine(b"not a dll", lambda *_: 0.0, lambda _: False, lambda _: True)
 
 
-def test_imported_data_includes_the_rules(database):
-    assert database is not None
-    assert load_rules_dll is not None
+def test_the_app_does_not_import_the_emulator():
+    """The product is all native: the emulator is a test tool only."""
+    import subprocess
+    import sys
+
+    code = "import sys, openpclink.gui, openpclink.cli; print('unicorn' in sys.modules or 'pefile' in sys.modules or 'openpclink.rules' in sys.modules)"
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env={"QT_QPA_PLATFORM": "offscreen", "PYTHONPATH": "src"})
+    assert out.stdout.strip() == "False", out.stderr

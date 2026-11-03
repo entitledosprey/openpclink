@@ -18,6 +18,7 @@ table = RulesTable.load(Path(sys.argv[1]), pinned)
 maps = sorted((folder / "Sample Maps").glob("*.pcl*"))[:: int(sys.argv[2]) if len(sys.argv) > 2 else 8]
 rng = random.Random(7)
 total = wrong = 0
+controlled = controlled_wrong = 0
 examples = {}
 for path in maps:
     tune = MapFile.load(path, db.map_key)
@@ -34,10 +35,13 @@ for path in maps:
         real.value_changed(i, entries[i].values[0], entries[i].values[0], FLAG_STARTUP)
         native.value_changed(i, entries[i].values[0])
     def score(stage):
-        global total, wrong
+        global total, wrong, controlled, controlled_wrong
         for i in entries:
             if db.known(i) and not db.parameter(i).path[:1] == ("Table Allocation",):
                 total += 1
+                if bool(real.visible(i)) != bool(default(i)):  # The rules matter for this one.
+                    controlled += 1
+                    controlled_wrong += bool(real.visible(i)) != bool(native.visible(i))
                 if bool(real.visible(i)) != bool(native.visible(i)):
                     wrong += 1
                     examples.setdefault((stage, i), (path.name[:28], db.parameter(i).caption, real.visible(i), native.visible(i)))
@@ -49,5 +53,6 @@ for path in maps:
         real.value_changed(i, old, new); native.value_changed(i, new)
     score("changes")
 print("maps", len(maps), "checks", total, "wrong", wrong, f"agreement {100 * (1 - wrong / max(total, 1)):.2f}%")
+print(f"where the rules change the answer: {controlled} checks, native wrong on {controlled_wrong} ({100 * (1 - controlled_wrong / max(controlled, 1)):.1f}% right)")
 for key, value in list(examples.items())[:15]:
     print(key, value)

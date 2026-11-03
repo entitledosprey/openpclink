@@ -10,7 +10,7 @@ from openpclink.rules import FLAG_USER_CHANGE, RulesEngine
 
 db = Database.load()
 dll = Path("work/extracted/app/PCLink G5/D_menu.dll").read_bytes()
-MAX_PATHS = int(sys.argv[2]) if len(sys.argv) > 2 else 20000
+MAX_PATHS = int(sys.argv[2]) if len(sys.argv) > 2 else 1500
 MAX_DEPTH = 1
 NUMBERS = (0.0, 1.0)
 
@@ -30,8 +30,13 @@ class Probe(RulesEngine):
             self.fresh.append(key)
         return value
 
+    compared = frozenset()
+
     def candidates(self, key):
         data_id, prop, _ = key
+        if prop == 2 and db.known(data_id) and db.parameter(data_id).options and db.parameter(data_id).path[:1] != ("Table Allocation",):
+            count = len(db.parameter(data_id).options)
+            return tuple(sorted({0, 1} | {v for v in self.compared if 0 <= v < count}))
         # Table slots multiply the paths without changing what shows. Pinned to OFF.
         if db.known(data_id) and db.parameter(data_id).path[:1] == ("Table Allocation",):
             return (0,)
@@ -62,6 +67,32 @@ probe = Probe(dll, lambda *_: 0.0, lambda _: True, lambda _: True)
 probe.assign, probe.fresh, probe.written, probe.effects = {}, [], {}, []
 
 
+TEXT_START, TEXT_END = 0x401000, 0x523000
+
+
+def trace_compares(trigger, new_value):
+    """Record constants the rules compare against, so only those values are tried."""
+    from unicorn import UC_HOOK_CODE
+
+    seen = set()
+    uc = probe._uc
+
+    def on_code(_uc, address, size, _data):
+        code = bytes(uc.mem_read(address, min(size, 7)))
+        if code[0] == 0x3D and size == 5:  # cmp eax, imm32
+            seen.add(int.from_bytes(code[1:5], "little", signed=True))
+        elif code[0] == 0x83 and size >= 3 and (code[1] >> 3) & 7 == 7:  # cmp r/m, imm8
+            seen.add(int.from_bytes(code[size - 1:size], "little", signed=True))
+        elif code[0] == 0x81 and size >= 6 and (code[1] >> 3) & 7 == 7:  # cmp r/m, imm32
+            seen.add(int.from_bytes(code[size - 4:size], "little", signed=True))
+
+    hook = uc.hook_add(UC_HOOK_CODE, on_code, begin=TEXT_START, end=TEXT_END)
+    probe.compared = frozenset()
+    run(trigger, new_value, {})
+    uc.hook_del(hook)
+    probe.compared = frozenset(seen)
+
+
 def run(trigger, new_value, assign):
     probe.assign, probe.fresh, probe.written, probe.effects = dict(assign), [], {}, []
     probe.value_changed(trigger, 0, new_value, FLAG_USER_CHANGE)
@@ -71,6 +102,7 @@ def run(trigger, new_value, assign):
 
 def explore(trigger, new_value):
     """Keep a branch only where changing one read changes what shows."""
+    trace_compares(trigger, new_value)
     reads, outcome = run(trigger, new_value, {})
     rules = [({}, outcome)]
     queue = [({}, reads, outcome, 0)]
@@ -106,7 +138,7 @@ target = Path(sys.argv[3]) if len(sys.argv) > 3 else Path("work/rules.json.gz")
 start = time.time(); table = {}; stats = collections.Counter(); truncated = []
 for n, data_id in enumerate(ids):
     parameter = db.parameter(data_id)
-    values = list(range(len(parameter.options))) if parameter.options else [0, 1]
+    values = [0, 1]  # The rules read the setting's value themselves, so these two are enough.
     entry = {}
     for value in values:
         rules, cut = explore(data_id, value)
@@ -122,8 +154,10 @@ for n, data_id in enumerate(ids):
             entry[str(value)] = kept
     if entry:
         table[str(data_id)] = entry
-    if n % 50 == 0:
-        print(shard, n, len(ids), dict(stats), "with rules", len(table), "truncated", len(truncated), round(time.time() - start), "s", flush=True)
+    print(shard, n, len(ids), data_id, dict(stats), "with rules", len(table), "truncated", len(truncated), round(time.time() - start), "s", flush=True)
+    if n % 25 == 0:
+        with gzip.open(target, "wt") as out:
+            json.dump({"complete": False, "rules": table, "truncated": truncated}, out)
 with gzip.open(target, "wt") as out:
     json.dump({"complete": True, "rules": table, "truncated": truncated}, out)
 print("DONE", shard, dict(stats), "with rules", len(table), "truncated", len(truncated), round(time.time() - start), "s", flush=True)

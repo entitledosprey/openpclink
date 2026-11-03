@@ -1,7 +1,6 @@
 """Desktop tuning interface. All ECU traffic runs on one worker thread."""
 from __future__ import annotations
 
-import logging
 import os
 import queue
 import sys
@@ -15,15 +14,14 @@ from .crypto import BadContainer, ProtectedFile
 from .database import MENU_ORDER, Database, DatabaseMissing, HelpManual, Parameter
 from .diagnostics import enable_log_file
 from .ecu import ENGINE_SPEED_ID, SECRET_IDS, Ecu, EcuProtected, StoreUnconfirmed, WriteMismatch, WriteRefused
-from .importer import ImportFailed, import_pclink, load_rules_dll
+from .importer import ImportFailed, import_pclink, rules_table_path
 from .logfile import PcLogger, read_log
 from .mapfile import MapError, MapFile, OfflineEcu, compare
 from .protocol import READ_ONLY_ENV, ForbiddenCommand, ProtocolError
-from .rules import FLAG_STARTUP, RulesEngine, RulesError
+from .native_rules import NativeRules, RulesTable
 from .views import GaugePanel, LogViewer, SurfaceView, axis_cell, heat_colour, used_axis_length
 from .transports import TransportError, list_ports, open_transport
 
-log = logging.getLogger("openpclink.gui")
 POLL_INTERVAL_S = 0.1
 ID_ROLE = QtCore.Qt.ItemDataRole.UserRole
 GAUGE_CAPTIONS = ("Engine Speed", "MAP", "ECT", "IAT", "Batt Voltage", "TPS (Main)", "Lambda 1", "Ignition Angle")
@@ -36,13 +34,13 @@ class Worker(QtCore.QThread):
     wrote = QtCore.Signal(int, int)
     failed = QtCore.Signal(str)
     stored = QtCore.Signal()
-    rules_messages = QtCore.Signal(list)
     rules_status = QtCore.Signal(str)
     visibility_changed = QtCore.Signal()
 
     def __init__(self, database: Database) -> None:
         super().__init__()
-        self.rules: RulesEngine | None = None
+        self.rules: NativeRules | None = None
+        self.rules_table: RulesTable | None = None
         self.database = database
         self.ecu: Ecu | OfflineEcu | None = None
         self.jobs: queue.Queue = queue.Queue()
@@ -116,31 +114,36 @@ class Worker(QtCore.QThread):
             return 0.0  # The rules also ask about text and reserved parameters.
 
     def _start_rules(self) -> None:
-        """Run PCLink's own rules DLL over the current tune, as PCLink does on connecting."""
+        """Apply PCLink's dependent-setting rules to the current tune, as PCLink does on connecting."""
         self.rules = None
-        dll = load_rules_dll()
-        if dll is None:
-            self.rules_status.emit("PCLink's rules DLL was not imported, so dependent settings are not hidden.")
+        path = rules_table_path()
+        if path is None:
+            self.rules_status.emit("This build has no rules table, so dependent settings are not hidden.")
             return
         database = self.database
+
+        def pinned(data_id: int) -> bool:
+            return database.known(data_id) and database.parameter(data_id).path[:1] == ("Table Allocation",)
+
         try:
-            engine = RulesEngine(
-                dll,
-                self._rules_read,
-                lambda data_id: self.ecu is not None and data_id in self.ecu.table,
-                lambda data_id: database.known(data_id) and database.parameter(data_id).visible,
-            )
-            for data_id, loc in sorted(self.ecu.table.items()):
-                if data_id in SECRET_IDS or loc.is_string or not database.known(data_id) or data_id == 0:
-                    continue
-                if loc.count > 1 and not loc.is_bitfield:
-                    continue
-                value = self._rules_read(data_id)
-                engine.value_changed(data_id, value, value, FLAG_STARTUP)
-            engine.take_messages()
-            self.rules = engine
-        except (RulesError, ImportError, ValueError, OSError) as exc:
-            self.rules_status.emit(f"PCLink's rules could not run, so dependent settings are not hidden: {exc}")
+            if self.rules_table is None:
+                self.rules_table = RulesTable.load(path, pinned)
+        except (OSError, ValueError, KeyError) as exc:
+            self.rules_status.emit(f"The rules table could not be read, so dependent settings are not hidden: {exc}")
+            return
+        engine = NativeRules(
+            self.rules_table,
+            self._rules_read,
+            lambda data_id: self.ecu is not None and data_id in self.ecu.table,
+            lambda data_id: database.known(data_id) and database.parameter(data_id).visible,
+        )
+        for data_id, loc in sorted(self.ecu.table.items()):
+            if data_id in SECRET_IDS or loc.is_string or not database.known(data_id) or data_id == 0:
+                continue
+            if loc.count > 1 and not loc.is_bitfield:
+                continue
+            engine.value_changed(data_id, self._rules_read(data_id))
+        self.rules = engine
 
     def _set_value(self, data_id: int, value: float, index: int) -> None:
         old = self._rules_read(data_id, index)
@@ -148,22 +151,10 @@ class Worker(QtCore.QThread):
         new = self._rules_read(data_id, index)
         if self.rules is None or new == old or index != 0:
             return
-        try:
-            self.rules.visibility_changed = False
-            changes = list(self.rules.value_changed(data_id, old, new))
-            messages = self.rules.take_messages()
-        except RulesError as exc:
-            self.rules = None
-            self.rules_status.emit(f"PCLink's rules stopped, so dependent settings are no longer hidden: {exc}")
-            return
-        if messages:
-            self.rules_messages.emit(messages)
+        self.rules.visibility_changed = False
+        self.rules.value_changed(data_id, new)
         if self.rules.visibility_changed:
             self.visibility_changed.emit()
-        # Real PCLink was seen not to make a change the rules asked for (2754 -> 3460 = 56),
-        # so these are recorded for comparison and never sent.
-        for change in changes:
-            log.info("rules asked for %s[%s] = %s after %s changed; not applied", change.data_id, change.index, change.value, data_id)
 
     def _guarded(self, action, data_id: int, index: int) -> None:
         try:
@@ -621,7 +612,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.wrote.connect(self._on_wrote)
         self.worker.failed.connect(self.show_error)
         self.worker.stored.connect(self._on_stored)
-        self.worker.rules_messages.connect(lambda messages: self.show_error("\n\n".join(messages)))
         self.worker.rules_status.connect(self.statusBar().showMessage)
         self.worker.visibility_changed.connect(self._on_visibility_changed)
         self.worker.start()

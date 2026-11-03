@@ -97,8 +97,8 @@ updates, Restore to Factory Settings, setting or removing passwords, ECU unlock 
 **Not built yet:** most of PCLink's calibration, logging and display tools. [docs/PARITY.md](docs/PARITY.md) is the
 full checklist.
 
-**Rules:** the app runs PCLink's own `D_menu.dll` from your copy in a CPU emulator, for dependent hiding and messages.
-The rules also ask for related settings to change, but real PCLink was seen not to make one of those, so the app never
-sends them, only logs them. PCLink may really make others, so **keep making mode and function changes in official PCLink**.
+**Rules:** dependent-setting rules run natively from a data table generated at build time from your copy of PCLink.
+They cover hiding only. PCLink's warnings, cross-field checks and related-setting changes are not included, so **keep
+making mode and function changes in official PCLink**.
 
 See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the protocol.

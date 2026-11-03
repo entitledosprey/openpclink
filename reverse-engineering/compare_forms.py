@@ -34,14 +34,21 @@ while stack:
     mine.setdefault(item.text(0), []).append((bool(item.childCount()), [db.parameter(i).caption for i in sorted(shown, key=lambda i: -db.parameter(i).priority)]))
     stack.extend((item.child(i), parents + (item.text(0),)) for i in range(item.childCount()))
 def norm(s): return "".join(ch for ch in s.lower() if ch.isalnum())
-def same(a, b): return difflib.SequenceMatcher(None, norm(a), norm(b)).ratio() > 0.8
+def same(a, b): return norm(a) == norm(b) or difflib.SequenceMatcher(None, norm(a), norm(b)).ratio() > 0.8
 seen = {}
 for frame, form in real.items():
     seen.setdefault(form["title"], form["rows"])
 result = {"match": [], "tables": [], "folders": [], "differ": [], "missing_here": []}
 for title, rows in seen.items():
     best = None
-    candidates = next((v for k, v in mine.items() if same(k, title)), None)
+    # An exact title first: similar names such as "GP PWM 1" and "GP Temp 1" are different forms.
+    candidates = next((v for k, v in mine.items() if norm(k) == norm(title)), None)
+    if candidates is None:
+        candidates = max(
+            (v for k, v in mine.items() if same(k, title)),
+            key=lambda v: 0,
+            default=None,
+        )
     if candidates is None:
         result["missing_here"].append(title); continue
     if any(same(t, title) for t in tables):

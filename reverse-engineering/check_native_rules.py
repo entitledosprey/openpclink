@@ -15,7 +15,7 @@ folder = Path("work/extracted/app/PCLink G5")
 dll = (folder / "D_menu.dll").read_bytes()
 pinned = lambda i: db.known(i) and db.parameter(i).path[:1] == ("Table Allocation",)
 table = RulesTable.load(Path(sys.argv[1]), pinned)
-maps = sorted((folder / "Sample Maps").glob("*.pcl*"))[:: int(sys.argv[2]) if len(sys.argv) > 2 else 8]
+maps = [Path(sys.argv[2])] if len(sys.argv) > 2 and sys.argv[2].endswith("x") else sorted((folder / "Sample Maps").glob("*.pcl*"))[:: int(sys.argv[2]) if len(sys.argv) > 2 else 8]
 rng = random.Random(7)
 total = wrong = 0
 controlled = controlled_wrong = 0

@@ -7,6 +7,13 @@ import sys
 from pathlib import Path
 from openpclink.importer import import_pclink
 print("baked", import_pclink(Path(sys.argv[1]), Path("src/openpclink/data/pclink-data.json.gz")))
+from openpclink.database import Database
+from openpclink.native_rules import compile_table
+db = Database.load(Path("src/openpclink/data/pclink-data.json.gz"))
+source = Path("packaging/pclink-rules.source.json.gz")
+if not source.exists():
+    sys.exit("missing packaging/pclink-rules.source.json.gz; generate it with reverse-engineering/extract_rules.py")
+compile_table(source, Path("src/openpclink/data/pclink-rules.json.gz"), lambda i: db.known(i) and db.parameter(i).path[:1] == ("Table Allocation",))
 PY
     pyinstaller --noconfirm --clean --name OpenPCLink \
         --paths src \

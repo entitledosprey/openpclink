@@ -85,3 +85,30 @@ def test_the_app_does_not_import_the_emulator():
     code = "import sys, openpclink.gui, openpclink.cli; print('unicorn' in sys.modules or 'pefile' in sys.modules or 'openpclink.rules' in sys.modules)"
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env={"QT_QPA_PLATFORM": "offscreen", "PYTHONPATH": "src"})
     assert out.stdout.strip() == "False", out.stderr
+
+
+def test_a_compiled_table_gives_the_same_rules_as_its_source(database, tmp_path):
+    import gzip
+    import json
+
+    from openpclink.native_rules import RulesTable, compile_table
+
+    pinned = lambda data_id: False  # noqa: E731
+    raw = {"rules": {"5": {"1": {"rules": [{"when": [[6, 2, 0, 1]], "visible": [[7, 1]]}], "domains": {"6": [0, 1]}}}}}
+    source = tmp_path / "source.json.gz"
+    with gzip.open(source, "wt") as out:
+        json.dump(raw, out)
+    target = tmp_path / "compiled.gz"
+    compile_table(source, target, pinned)
+    assert RulesTable.load(target, pinned).rules == RulesTable.load(source, pinned).rules
+
+
+def test_units_and_menu_moves_follow_the_rules():
+    from openpclink.native_rules import NativeRules, RulesTable
+
+    raw = {"rules": {"5": {"1": {"rules": [{"when": [], "visible": [], "captions": [[7, "ms"]], "messages": [], "parents": [[7, "1"]]}], "domains": {}}}}}
+    rules = NativeRules(RulesTable(raw, lambda _: False), lambda *_: 0.0, lambda _: True, lambda _: True)
+    rules.value_changed(5, 1)
+    assert rules.units[7] == "ms"
+    assert rules.parents[7] == "1"
+    assert rules.visibility_changed

@@ -98,7 +98,7 @@ updates, Restore to Factory Settings, setting or removing passwords, ECU unlock 
 full checklist.
 
 **Rules:** dependent-setting rules run natively from a data table generated at build time from your copy of PCLink.
-They cover hiding only. PCLink's warnings, cross-field checks and related-setting changes are not included, so **keep
-making mode and function changes in official PCLink**.
+They cover hiding, warnings, unit changes and menu moves. Related-setting changes are not included, and accuracy on a
+fully configured tune is lower than on the sample maps, so **keep making mode and function changes in official PCLink**.
 
 See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the protocol.

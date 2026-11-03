@@ -131,8 +131,10 @@ class Database:
         return self._prop(int(parent), name, depth + 1) if parent and parent.isdigit() else None
 
     def _menu_path(self, data_id: int) -> tuple[str, ...]:
-        """The menu location. `Parent` is string IDs joined by a backslash."""
-        raw = self._params[data_id]["props"].get("Parent") or ""
+        return self.menu_path_from(self._params[data_id]["props"].get("Parent") or "")
+
+    def menu_path_from(self, raw: str) -> tuple[str, ...]:
+        """A menu location. `Parent` is string IDs joined by a backslash."""
         names = (self._string(part.strip("_ ")) for part in raw.split("\\"))
         return tuple(name for name in names if name)
 

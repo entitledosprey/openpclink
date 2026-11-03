@@ -3,7 +3,7 @@
 Each run answers the DLL's reads from an assignment; each new read is a branch to explore.
 The output is plain data for a native evaluator. This tool is never shipped.
 """
-import collections, gzip, json, sys, time
+import collections, gzip, json, struct, sys, time
 from pathlib import Path
 from openpclink.database import Database
 from openpclink.rules import FLAG_USER_CHANGE, RulesEngine
@@ -13,6 +13,7 @@ dll = Path("work/extracted/app/PCLink G5/D_menu.dll").read_bytes()
 MAX_PATHS = int(sys.argv[2]) if len(sys.argv) > 2 else 1500
 MAX_DEPTH = 1
 NUMBERS = (0.0, 1.0)
+STRING_CALLBACK = 0x68008F00
 
 
 class Probe(RulesEngine):
@@ -62,8 +63,19 @@ class Probe(RulesEngine):
         self.effects.append(("int", data_id, prop, value))
         self._return_int(0, 2)
 
+    def _set_string(self):
+        data_id, prop = self._ids()
+        pointer = self._arg(1)
+        text = self._wstr(pointer) if pointer else ""
+        self.effects.append(("str", data_id, prop, text))
+        self._return_int(0, 2)
+
+    def _message_box(self):
+        pointer = self._ids()[0]
+        self.effects.append(("msg", self._wstr(pointer) if pointer else ""))
+        self._return_int(1, 1)
+
     def _set_double(self):
-        import struct
         data_id, prop = self._ids()
         index = self._arg(0)
         value = struct.unpack("<d", self._uc.mem_read(self._sp() + 8, 8))[0]
@@ -73,10 +85,29 @@ class Probe(RulesEngine):
 
 
 probe = Probe(dll, lambda *_: 0.0, lambda _: True, lambda _: True)
+
+
+def enumerated_string():
+    """PCLink's string lookup: the DLL gets its messages and captions through this."""
+    x86 = probe._x86
+    number = probe._uc.reg_read(x86.UC_X86_REG_EAX)
+    result = probe._uc.reg_read(x86.UC_X86_REG_EDX)
+    text = db._strings.get(number, "")
+    data = text.encode("utf-16le")
+    block = probe._alloc(12 + len(data) + 2)
+    probe._uc.mem_write(block, struct.pack("<HHiI", 1200, 2, -1, len(text)) + data + b"\0\0")
+    probe._w32(result, block + 12)
+    probe._return_int(result, 0)
+
+
+probe._callbacks[STRING_CALLBACK] = enumerated_string
+probe._call(probe._export("SetGetEnumeratedString"), eax=probe._this, edx=STRING_CALLBACK)
 probe.assign, probe.fresh, probe.written, probe.effects = {}, [], {}, []
 
 
 TEXT_START, TEXT_END = 0x401000, 0x523000
+PARENT_PROP = 5
+CAPTION_PROP = 0x13
 
 
 def trace_compares(trigger, new_value):
@@ -106,7 +137,10 @@ def run(trigger, new_value, assign):
     probe.assign, probe.fresh, probe.written, probe.effects = dict(assign), [], {}, []
     probe.value_changed(trigger, 0, new_value, FLAG_USER_CHANGE)
     shown = {e[1]: e[3] for e in probe.effects if e[0] == "int" and e[2] == 10}
-    return dict(probe.assign), tuple(sorted(shown.items()))
+    captions = {e[1]: e[3] for e in probe.effects if e[0] == "str" and e[2] == CAPTION_PROP}
+    parents = {e[1]: e[3] for e in probe.effects if e[0] == "str" and e[2] == PARENT_PROP}
+    messages = tuple(e[1] for e in probe.effects if e[0] == "msg")
+    return dict(probe.assign), (tuple(sorted(shown.items())), tuple(sorted(captions.items())), messages, tuple(sorted(parents.items())))
 
 
 def explore(trigger, new_value):
@@ -156,9 +190,15 @@ for n, data_id in enumerate(ids):
         if cut:
             truncated.append((data_id, value))
         kept = [
-            {"when": [[k[0], k[1], k[2], v] for k, v in conditions.items()], "visible": [list(x) for x in outcome]}
+            {
+                "when": [[k[0], k[1], k[2], v] for k, v in conditions.items()],
+                "visible": [list(x) for x in outcome[0]],
+                "captions": [list(x) for x in outcome[1]],
+                "messages": list(outcome[2]),
+                "parents": [list(x) for x in outcome[3]],
+            }
             for conditions, outcome in rules
-            if outcome or conditions
+            if any(outcome) or conditions
         ]
         if kept:
             entry[str(value)] = {"rules": kept, "domains": {str(k): list(v) for k, v in probe.domains.items()}}

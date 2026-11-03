@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import marshal
 from pathlib import Path
 from typing import Callable
 
@@ -27,6 +28,9 @@ class RulesTable:
                         (
                             tuple((c[0], c[1], c[2], c[3]) for c in rule["when"] if not is_pinned(c[0])),
                             tuple((v[0], v[1]) for v in rule["visible"]),
+                            tuple((v[0], v[1]) for v in rule.get("captions", ())),
+                            tuple(rule.get("messages", ())),
+                            tuple((v[0], v[1]) for v in rule.get("parents", ())),
                         )
                         for rule in sorted(group["rules"], key=lambda rule: -len(rule["when"]))
                     ],
@@ -37,8 +41,18 @@ class RulesTable:
 
     @classmethod
     def load(cls, path: Path, is_pinned: Callable[[int], bool]) -> "RulesTable":
-        with gzip.open(path, "rt") as stream:
-            return cls(json.load(stream), is_pinned)
+        with gzip.open(path, "rb") as stream:
+            data = stream.read()
+        table = cls.__new__(cls)
+        if data[:1] == b"{":
+            table.__init__(json.loads(data), is_pinned)
+        else:
+            table.rules = marshal.loads(data)  # Precompiled by compile_table() in this build.
+        return table
+
+    def save_compiled(self, path: Path) -> None:
+        with gzip.open(path, "wb", compresslevel=1) as stream:
+            stream.write(marshal.dumps(self.rules))
 
 
 class NativeRules:
@@ -52,6 +66,9 @@ class NativeRules:
         self.table = table
         self.read_value, self.exists, self.default_visible = read_value, exists, default_visible
         self.shown: dict[int, int] = {}
+        self.units: dict[int, str] = {}
+        self.parents: dict[int, str] = {}
+        self.messages: list[str] = []
         self.visibility_changed = False
 
     def visible(self, data_id: int) -> bool:
@@ -76,10 +93,25 @@ class NativeRules:
             return
         group = by_value.get(1 if new > 0 else 0) or next(iter(by_value.values()))
         rules, domains = group
-        for conditions, shown in rules:
+        for conditions, shown, units, messages, parents in rules:
             if all(self._holds(domains, *condition) for condition in conditions):
                 for target, value in shown:
                     if self.shown.get(target) != value:
                         self.visibility_changed = True
                     self.shown[target] = value
+                self.units.update(units)
+                for target, parent in parents:
+                    if self.parents.get(target) != parent:
+                        self.visibility_changed = True
+                    self.parents[target] = parent
+                self.messages.extend(messages)
                 return
+
+    def take_messages(self) -> list[str]:
+        messages, self.messages = self.messages, []
+        return messages
+
+
+def compile_table(source: Path, target: Path, is_pinned: Callable[[int], bool]) -> None:
+    """Precompile for this Python version, so connecting does not wait on parsing."""
+    RulesTable.load(source, is_pinned).save_compiled(target)

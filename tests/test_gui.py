@@ -323,3 +323,17 @@ def test_only_what_real_pclink_sends_is_sent_when_a_mode_changes(session):
     pump(app, lambda: False, timeout=0.5)
     assert sim.writes == [bytes.fromhex("37b3000120")]
     assert window.worker.ecu.get(3460) == 0
+
+
+def test_a_rules_warning_reaches_the_user_when_a_change_triggers_it(session):
+    app, window, sim = session
+    rule = ((), (), (), ("Test warning from the rules",), ())
+    window.worker.rules.table.rules[2754] = {1: ([rule], {})}
+    window.write(2754, 1, 0)
+    assert pump(app, lambda: window.errors)
+    assert window.errors == ["Test warning from the rules"]
+
+
+def test_rules_warnings_are_silent_while_connecting(session):
+    _, window, _ = session
+    assert window.errors == []

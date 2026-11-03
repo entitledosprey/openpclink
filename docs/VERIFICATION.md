@@ -34,9 +34,14 @@ five further reads showed none. Which bytes they were was not captured, so the c
 Running Time and Num of Starts were seen to change by themselves, so comparisons now ignore statistics, but those
 changes persisted and that earlier one did not, so this is not a proven explanation.
 
-**Fixed in 0.2.1:** with the GUI running in the same process, about 20% of polls lost bytes, and a shorter thread
-switch interval did not help. Running the FTDI link in its own process cut that to under 1% (2-3 of about 350),
-with retries recovering those. The cause of the remainder is unknown.
+**Partly fixed in 0.2.1:** with the GUI running in the same process, about 20% of polls lost bytes. Running the FTDI
+link in its own process gave 2-3 of about 350 in one session, but 27 of 239 (about 11%) in a later one, on battery. The
+FT232H overflows if unread for about 2 ms, and the cause of the variation is not confirmed. Retries recover these, and
+replies are checked by CRC, so live values can stutter but should not be wrong.
+
+**Native rules on this ECU's tune:** against the DLL, 162 of 8,684 visibility answers differ, 14 of them among the 1,119
+where the rules change the answer. That is worse than on the sample maps. Most errors hide something the DLL shows,
+probably rules needing two conditions together, which the one-at-a-time probing misses.
 
 ## Not verified
 
@@ -74,7 +79,7 @@ contents of write replies (handled by reading back if not an echo), timing, and 
   never loads the emulator. On one sample map, 242 of 252 forms match real PCLink row for row by caption: 6 differ and 4 are
   missing here. Tables (34) and folders (72) are excluded from that score. Against the DLL across 9 sample maps, 235 of 69,858 visibility answers differ, 9 of them among the 11,251 where
   the rules change the answer. Probing tries one change at a time and caps 75 list-scanning settings, so rules needing
-  other combinations can be missing. Warnings, cross-field checks and related changes are not ported. The DLL asked
+  other combinations can be missing. 6 cross-field warnings, unit changes and menu moves are included, but only compared with the DLL in form scores. Related value changes are not ported. The DLL asked
   for 2754 = 1 to also set 3460 = 56, but real PCLink wrote only the mode byte; why is not known.
 - Only 3 engine-running locks were observed, on one form. PCLink's rule was not recovered, and other
   settings may be padlocked there but **writable here with the engine running**.

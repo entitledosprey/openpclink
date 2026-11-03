@@ -19,7 +19,10 @@ def pump(s):
     while time.time() - t < s:
         app.processEvents(); time.sleep(.005)
 polls = [0]; w.worker.runtime.connect(lambda: polls.__setitem__(0, polls[0] + 1))
-pump(4); print("status", w.status_label.text())
+t0 = time.time()
+while w.status_label.text() != "ONLINE" and time.time() - t0 < 40:
+    pump(0.1)
+print("status", w.status_label.text(), "connect s", round(time.time() - t0, 1), "rules", w.worker.rules is not None, w.statusBar().currentMessage()[:80])
 if w.status_label.text() != "ONLINE": sys.exit(2)
 item = next(w.tree.topLevelItem(i) for i in range(w.tree.topLevelItemCount()) if w.tree.topLevelItem(i).text(0) == "Fuel")
 it = next(item.child(i) for i in range(item.childCount()) if item.child(i).text(0) == "Fuel Table 1"); w.tree.setCurrentItem(it)

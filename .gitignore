@@ -1,6 +1,7 @@
 # Reverse-engineering workspace and anything derived from Link's installer.
 work/
 data/
+packaging/pclink-rules.source.json.gz
 *.exe
 *.pclx
 *.pcl5

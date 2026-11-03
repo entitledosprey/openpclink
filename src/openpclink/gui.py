@@ -35,6 +35,7 @@ class Worker(QtCore.QThread):
     failed = QtCore.Signal(str)
     stored = QtCore.Signal()
     rules_status = QtCore.Signal(str)
+    rules_messages = QtCore.Signal(list)
     visibility_changed = QtCore.Signal()
 
     def __init__(self, database: Database) -> None:
@@ -143,6 +144,7 @@ class Worker(QtCore.QThread):
             if loc.count > 1 and not loc.is_bitfield:
                 continue
             engine.value_changed(data_id, self._rules_read(data_id))
+        engine.take_messages()  # PCLink's checks speak up on a change, not on connecting.
         self.rules = engine
 
     def _set_value(self, data_id: int, value: float, index: int) -> None:
@@ -153,6 +155,9 @@ class Worker(QtCore.QThread):
             return
         self.rules.visibility_changed = False
         self.rules.value_changed(data_id, new)
+        messages = list(dict.fromkeys(self.rules.take_messages()))
+        if messages:
+            self.rules_messages.emit(messages)
         if self.rules.visibility_changed:
             self.visibility_changed.emit()
 
@@ -300,7 +305,8 @@ class ParameterForm(QtWidgets.QWidget):
             parameter.maximum if parameter.maximum is not None else 1e9,
         )
         spin.setSingleStep(abs(loc.scale) or 1)
-        spin.setSuffix(f" {parameter.units}" if parameter.units else "")
+        units = self.window_.units_of(parameter)
+        spin.setSuffix(f" {units}" if units else "")
         spin.setReadOnly(read_only)
         spin.installEventFilter(self._wheel_guard)
         spin.editingFinished.connect(lambda: self._commit_number(data_id, spin))
@@ -613,6 +619,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.failed.connect(self.show_error)
         self.worker.stored.connect(self._on_stored)
         self.worker.rules_status.connect(self.statusBar().showMessage)
+        self.worker.rules_messages.connect(lambda messages: self.show_error("\n\n".join(messages)))
         self.worker.visibility_changed.connect(self._on_visibility_changed)
         self.worker.start()
 
@@ -704,6 +711,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---- menu tree --------------------------------------------------------
 
+    def menu_path(self, data_id: int) -> tuple[str, ...]:
+        """Where a setting sits now: PCLink's rules can move it to another menu."""
+        rules = self.worker.rules
+        moved = rules.parents.get(data_id) if rules else None
+        return self.database.menu_path_from(moved) if moved else self.database.parameter(data_id).path
+
+    def units_of(self, parameter: Parameter) -> str:
+        rules = self.worker.rules
+        return (rules.units.get(parameter.data_id) if rules else None) or parameter.units
+
     def parameter_visible(self, data_id: int) -> bool:
         ecu = self.worker.ecu
         if ecu is None or not self.database.is_visible(data_id, ecu.info.link_id, self._option_of):
@@ -739,8 +756,9 @@ class MainWindow(QtWidgets.QMainWindow):
             statistics = parameter.path[:1] == ("Statistics",)
             if self._is_live(data_id) != live and not (statistics and not live):
                 continue
-            if parameter.path and (live or statistics or not parameter.is_runtime_value):
-                groups[parameter.path].append(data_id)
+            path = self.menu_path(data_id)
+            if path and (live or statistics or not parameter.is_runtime_value):
+                groups[path].append(data_id)
         return {
             path: ids for path, ids in groups.items() if any(self.parameter_visible(i) for i in ids)
         }
@@ -903,7 +921,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for row, data_id in enumerate(self.gauge_ids):
             parameter = self.database.parameter(data_id)
             decimals = parameter.decimals if parameter.decimals is not None else 1
-            text = self._format_live(parameter, ecu.get(data_id), decimals)
+            text = self._format_live(parameter, ecu.get(data_id), decimals, self.units_of(parameter))
             self.gauges.item(row, 1).setText(text)
             if data_id in self.gauge_panel.gauges:
                 self.gauge_panel.gauges[data_id].set_value(ecu.get(data_id), text)
@@ -914,10 +932,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 editor.update_trace()
 
     @staticmethod
-    def _format_live(parameter: Parameter, value: float, decimals: int) -> str:
+    def _format_live(parameter: Parameter, value: float, decimals: int, units: str = "") -> str:
         if parameter.options and 0 <= int(value) < len(parameter.options):
             return parameter.options[int(value)]
-        return f"{value:.{decimals}f} {parameter.units}".strip()
+        return f"{value:.{decimals}f} {units}".strip()
 
     # ---- writing ----------------------------------------------------------
 

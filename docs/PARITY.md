@@ -26,7 +26,8 @@ Taken from the real program's menus, source modules and strings. Status means wh
 |---|---|
 | Menu tree, order, per-ECU hiding | Done: PCLink (top level and sampled forms) |
 | Dependent hiding | Native, from a generated table: 242 of 252 forms match real PCLink on one sample map (6 differ, 4 missing) |
-| Warnings and cross-field checks from the rules | Missing |
+| Warnings and cross-field checks from the rules | Native: 6 messages from the DLL; not yet compared with real PCLink on screen |
+| Units and menu moves from the rules | Native: from the DLL; not yet compared with real PCLink |
 | Related changes from the rules | Missing: real PCLink did not make the one tested |
 | Search | Done: sim (name search only; PCLink's keywords not used) |
 | Tables: heat map, live cell, bulk edit, copy and paste, 3D, axis editing | Done: car (display), sim (edits) |

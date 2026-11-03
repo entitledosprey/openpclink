@@ -10,7 +10,7 @@ from openpclink.rules import FLAG_USER_CHANGE, RulesEngine
 
 db = Database.load()
 dll = Path("work/extracted/app/PCLink G5/D_menu.dll").read_bytes()
-MAX_PATHS = int(sys.argv[2]) if len(sys.argv) > 2 else 1500
+MAX_PATHS = int(sys.argv[2]) if __name__ == "__main__" and len(sys.argv) > 2 else 1500
 MAX_DEPTH = 1
 NUMBERS = (0.0, 1.0)
 STRING_CALLBACK = 0x68008F00
@@ -175,39 +175,44 @@ def explore(trigger, new_value):
     return rules, cut
 
 
-shard, shards = (int(x) for x in sys.argv[4].split("/")) if len(sys.argv) > 4 else (0, 1)
-everything = db.ids if sys.argv[1] == "all" else [int(x) for x in sys.argv[1].split(",")]
-ids = everything[shard::shards]
-target = Path(sys.argv[3]) if len(sys.argv) > 3 else Path("work/rules.json.gz")
-start = time.time(); table = {}; stats = collections.Counter(); truncated = []
-for n, data_id in enumerate(ids):
-    parameter = db.parameter(data_id)
-    values = [0, 1]  # The rules read the setting's value themselves, so these two are enough.
-    entry = {}
-    for value in values:
-        rules, cut = explore(data_id, value)
-        stats["rules"] += len(rules)
-        if cut:
-            truncated.append((data_id, value))
-        kept = [
-            {
-                "when": [[k[0], k[1], k[2], v] for k, v in conditions.items()],
-                "visible": [list(x) for x in outcome[0]],
-                "captions": [list(x) for x in outcome[1]],
-                "messages": list(outcome[2]),
-                "parents": [list(x) for x in outcome[3]],
-            }
-            for conditions, outcome in rules
-            if any(outcome) or conditions
-        ]
-        if kept:
-            entry[str(value)] = {"rules": kept, "domains": {str(k): list(v) for k, v in probe.domains.items()}}
-    if entry:
-        table[str(data_id)] = entry
-    print(shard, n, len(ids), data_id, dict(stats), "with rules", len(table), "truncated", len(truncated), round(time.time() - start), "s", flush=True)
-    if n % 25 == 0:
-        with gzip.open(target, "wt") as out:
-            json.dump({"complete": False, "rules": table, "truncated": truncated}, out)
-with gzip.open(target, "wt") as out:
-    json.dump({"complete": True, "rules": table, "truncated": truncated}, out)
-print("DONE", shard, dict(stats), "with rules", len(table), "truncated", len(truncated), round(time.time() - start), "s", flush=True)
+def main():
+    shard, shards = (int(x) for x in sys.argv[4].split("/")) if len(sys.argv) > 4 else (0, 1)
+    everything = db.ids if sys.argv[1] == "all" else [int(x) for x in sys.argv[1].split(",")]
+    ids = everything[shard::shards]
+    target = Path(sys.argv[3]) if len(sys.argv) > 3 else Path("work/rules.json.gz")
+    start = time.time(); table = {}; stats = collections.Counter(); truncated = []
+    for n, data_id in enumerate(ids):
+        parameter = db.parameter(data_id)
+        values = [0, 1]  # The rules read the setting's value themselves, so these two are enough.
+        entry = {}
+        for value in values:
+            rules, cut = explore(data_id, value)
+            stats["rules"] += len(rules)
+            if cut:
+                truncated.append((data_id, value))
+            kept = [
+                {
+                    "when": [[k[0], k[1], k[2], v] for k, v in conditions.items()],
+                    "visible": [list(x) for x in outcome[0]],
+                    "captions": [list(x) for x in outcome[1]],
+                    "messages": list(outcome[2]),
+                    "parents": [list(x) for x in outcome[3]],
+                }
+                for conditions, outcome in rules
+                if any(outcome) or conditions
+            ]
+            if kept:
+                entry[str(value)] = {"rules": kept, "domains": {str(k): list(v) for k, v in probe.domains.items()}}
+        if entry:
+            table[str(data_id)] = entry
+        print(shard, n, len(ids), data_id, dict(stats), "with rules", len(table), "truncated", len(truncated), round(time.time() - start), "s", flush=True)
+        if n % 25 == 0:
+            with gzip.open(target, "wt") as out:
+                json.dump({"complete": False, "rules": table, "truncated": truncated}, out)
+    with gzip.open(target, "wt") as out:
+        json.dump({"complete": True, "rules": table, "truncated": truncated}, out)
+    print("DONE", shard, dict(stats), "with rules", len(table), "truncated", len(truncated), round(time.time() - start), "s", flush=True)
+
+
+if __name__ == "__main__":
+    main()

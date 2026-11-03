@@ -31,12 +31,14 @@ class Probe(RulesEngine):
         return value
 
     compared = frozenset()
+    domains = {}
 
     def candidates(self, key):
         data_id, prop, _ = key
         if prop == 2 and db.known(data_id) and db.parameter(data_id).options and db.parameter(data_id).path[:1] != ("Table Allocation",):
             count = len(db.parameter(data_id).options)
-            return tuple(sorted({0, 1} | {v for v in self.compared if 0 <= v < count}))
+            near = {w for v in self.compared for w in (v - 1, v, v + 1)}
+            return self.remember(data_id, tuple(sorted(({0, 1, count - 1} | near) & set(range(count)))))
         # Table slots multiply the paths without changing what shows. Pinned to OFF.
         if db.known(data_id) and db.parameter(data_id).path[:1] == ("Table Allocation",):
             return (0,)
@@ -44,7 +46,14 @@ class Probe(RulesEngine):
             return (1, 0)
         if prop == 2 and db.known(data_id) and db.parameter(data_id).options:
             return tuple(range(len(db.parameter(data_id).options)))
+        if prop == 2:
+            near = sorted({float(w) for v in self.compared if abs(v) <= 255 for w in (v - 1, v, v + 1)} | set(NUMBERS))
+            return self.remember(data_id, tuple(near[:24]))
         return NUMBERS
+
+    def remember(self, data_id, values):
+        self.domains[data_id] = values
+        return values
 
     def _set_int(self):
         data_id, prop = self._ids()
@@ -102,6 +111,7 @@ def run(trigger, new_value, assign):
 
 def explore(trigger, new_value):
     """Keep a branch only where changing one read changes what shows."""
+    probe.domains = {}
     trace_compares(trigger, new_value)
     reads, outcome = run(trigger, new_value, {})
     rules = [({}, outcome)]
@@ -151,7 +161,7 @@ for n, data_id in enumerate(ids):
             if outcome or conditions
         ]
         if kept:
-            entry[str(value)] = kept
+            entry[str(value)] = {"rules": kept, "domains": {str(k): list(v) for k, v in probe.domains.items()}}
     if entry:
         table[str(data_id)] = entry
     print(shard, n, len(ids), data_id, dict(stats), "with rules", len(table), "truncated", len(truncated), round(time.time() - start), "s", flush=True)

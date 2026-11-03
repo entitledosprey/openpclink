@@ -18,17 +18,21 @@ _PINNED_MENU = "Table Allocation"  # Extraction fixed these, so they decide noth
 
 class RulesTable:
     def __init__(self, raw: dict, is_pinned: Callable[[int], bool]) -> None:
-        self.rules: dict[int, dict[int, list]] = {}
+        # setting -> probed value -> (rules, most specific first; values probed per read)
+        self.rules: dict[int, dict[int, tuple[list, dict[int, list[float]]]]] = {}
         for data_id, by_value in raw["rules"].items():
             self.rules[int(data_id)] = {
-                int(value): [
-                    (
-                        tuple((c[0], c[1], c[2], c[3]) for c in rule["when"] if not is_pinned(c[0])),
-                        tuple((v[0], v[1]) for v in rule["visible"]),
-                    )
-                    for rule in sorted(rules, key=lambda rule: -len(rule["when"]))
-                ]
-                for value, rules in by_value.items()
+                int(value): (
+                    [
+                        (
+                            tuple((c[0], c[1], c[2], c[3]) for c in rule["when"] if not is_pinned(c[0])),
+                            tuple((v[0], v[1]) for v in rule["visible"]),
+                        )
+                        for rule in sorted(group["rules"], key=lambda rule: -len(rule["when"]))
+                    ],
+                    {int(k): v for k, v in group["domains"].items()},
+                )
+                for value, group in by_value.items()
             }
 
     @classmethod
@@ -54,30 +58,26 @@ class NativeRules:
         stored = self.shown.get(data_id)
         return bool(stored) if stored is not None else self.default_visible(data_id)
 
-    def _holds(self, data_id: int, prop: int, index: int, expected: float) -> bool:
+    def _holds(self, domains: dict[int, list[float]], data_id: int, prop: int, index: int, expected: float) -> bool:
         if prop == _PROP_VISIBLE:
             return int(self.visible(data_id)) == expected
         if prop != _PROP_VALUE:
             return expected == 0
         actual = self.read_value(data_id, index) if self.exists(data_id) else 0.0
-        if actual == expected:
-            return True
-        # Plain numbers were probed at 0 and 1, the difference the rules test for.
-        return expected == 1 and actual > 0 and not self._is_option(data_id)
-
-    def _is_option(self, data_id: int) -> bool:
-        by_value = self.table.rules.get(data_id)
-        return bool(by_value) and len(by_value) > 2
+        probed = domains.get(data_id)
+        if probed:
+            # Probes bracket every compared constant, so the nearest behaves the same.
+            actual = min(probed, key=lambda value: (abs(value - actual), value))
+        return actual == expected
 
     def value_changed(self, data_id: int, new: float) -> None:
         by_value = self.table.rules.get(data_id)
         if not by_value:
             return
-        rules = by_value.get(int(new))
-        if rules is None:
-            rules = by_value.get(1 if new > 0 else 0)
-        for conditions, shown in rules or ():
-            if all(self._holds(*condition) for condition in conditions):
+        group = by_value.get(1 if new > 0 else 0) or next(iter(by_value.values()))
+        rules, domains = group
+        for conditions, shown in rules:
+            if all(self._holds(domains, *condition) for condition in conditions):
                 for target, value in shown:
                     if self.shown.get(target) != value:
                         self.visibility_changed = True

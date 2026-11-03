@@ -3,6 +3,22 @@
 Taken from the real program's menus, source modules and strings. Status means what exists here, and how it was checked:
 **car** = on the real ECU, **PCLink** = compared with real PCLink under Wine, **sim** = simulator or tests only.
 
+## Real PCLink's menus, item by item
+
+Read from real PCLink 7.8.2 under Wine. ✅ exists here, 🟡 partial, ❌ missing. A tick says it exists, not that it has run on a real ECU; the sections below say how each was checked.
+
+| Menu | Items |
+|---|---|
+| File | ✅ Open, ✅ Save, ✅ Save as, ❌ Save as Encrypted, ✅ Compare, ❌ Compare Close, ❌ Show Memo, ✅ Exit |
+| Options | 🟡 Connection, ❌ Preferences, ❌ Directories, ❌ Colour Theme, ❌ Units, ❌ Language, ✅ Setup ECU Parameters |
+| ECU Controls | ✅ Disconnect, ✅ Search, ❌ Update Firmware, ✅ Clear Fault Codes, ❌ ECU Log File Setup, ❌ ECU Log File Download, ❌ CAN Setup, ✅ Show Statistics, ✅ Clear Statistics, ✅ Store, ❌ ECU Unlock, ❌ Restore to Factory Settings, ❌ Setup Password, ❌ Unlock Password, 🟡 TPS Setup (no electronic throttle), ✅ MAP Sensor Calibration, ❌ Trigger Scope |
+| Display Mode | ✅ ECU, 🟡 Log Analysis, ❌ Full Screen with Menus, ❌ Full Screen |
+| Layout | ❌ New, ❌ Load, ❌ Save As, ❌ New Page, ❌ Delete Page, ❌ Rename Page, ❌ Configuration, ❌ Tuning, ❌ Logging, ❌ Mixture Map |
+| View | ✅ ECU Settings, ❌ Log File Manager, ✅ Parameters, ❌ Event Log, ❌ Digital Gauge, ❌ Bar Gauge, ❌ Curve Gauge, ✅ Dial Gauge, ❌ Target Gauge, ✅ Runtime Value List, 🟡 Help Browser, ❌ Vehicle Plan |
+| Logging | 🟡 Open Log File, ❌ Save Log File, ❌ Save As, ❌ Save All, ❌ Close, ❌ Close All, ❌ Log File Details, ❌ Export, ❌ Play, ✅ Record, ✅ Stop, ❌ Setup Logging, ❌ ECU Log File Download, ❌ Navigator, ✅ Time Plot, ❌ Logged Values List, 🟡 XY Plot, ❌ Vehicle Plan, ❌ Parameter List, 🟡 Histogram, ❌ Statistics, ❌ GPS Plot |
+| Tuning | ✅ Runtime Values, ❌ Quick Tune, ❌ Mixture Map, ❌ Knock Audio, ❌ Reset Tuning Markers, ❌ Undo Short Term Changes |
+| Help | ✅ Contents, ❌ Keyboard Shortcuts, ❌ Wiring Information, ❌ ECU Fault Codes, ❌ ECU Information, ❌ About |
+
 ## ECU controls
 
 | Feature | Status |

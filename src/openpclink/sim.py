@@ -49,6 +49,8 @@ class SimEcu:
         self.hardware_family = hardware_family
         self.flash_stored = 0
         self.factory_resets = 0
+        self.statistics_cleared = 0
+        self.map_calibrations = 0
         self.engine_running = True
         self.log: list[int] = []
         self.writes: list[bytes] = []
@@ -234,6 +236,12 @@ class SimEcu:
         if cmd == p.CMD_STORE:
             self.flash = bytes(self.memory)
             self.flash_stored += 1
+            return struct.pack(">H", 1)
+        if cmd == p.CMD_CLEAR_STATISTICS:
+            self.statistics_cleared += 1
+            return struct.pack(">H", 1)
+        if cmd == p.CMD_CALIBRATE_MAP:
+            self.map_calibrations += 1
             return struct.pack(">H", 1)
         if cmd == CMD_FACTORY_RESET:
             self.factory_resets += 1

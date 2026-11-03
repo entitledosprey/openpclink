@@ -30,7 +30,9 @@ CMD_FIRMWARE_INFO = 0x16
 CMD_BOOT_INFO = 0x18
 CMD_ERROR = 0x19
 CMD_IDENTITY = 0x1A
+CMD_CALIBRATE_MAP = 0x1F
 CMD_STORE = 0x20
+CMD_CLEAR_STATISTICS = 0x2F
 CMD_READ_SECTION2 = 0x32
 
 # Only these commands can be sent. The firmware updater's commands (0x10, 0x11,
@@ -49,7 +51,9 @@ ALLOWED_COMMANDS = frozenset(
         CMD_FIRMWARE_INFO,
         CMD_BOOT_INFO,
         CMD_IDENTITY,
+        CMD_CALIBRATE_MAP,
         CMD_STORE,
+        CMD_CLEAR_STATISTICS,
         CMD_READ_SECTION2,
     }
 )
@@ -71,6 +75,9 @@ RETRYABLE_COMMANDS = frozenset(
     }
 )
 READ_ATTEMPTS = 3
+
+# Exactly what real PCLink sends. 0x1F has another form with no payload whose purpose is unknown.
+CALIBRATE_MAP_PAYLOAD = bytes([0x00, CMD_CALIBRATE_MAP]) + bytes(8)
 
 # With this set in the environment, nothing that changes an ECU can be sent.
 READ_ONLY_ENV = "OPENPCLINK_READ_ONLY"
@@ -128,7 +135,7 @@ class Link:
     max_packet: int = 0x38
 
     def request(self, cmd: int, payload: bytes = b"", timeout: float = DEFAULT_TIMEOUT) -> bytes:
-        if cmd not in ALLOWED_COMMANDS:
+        if cmd not in ALLOWED_COMMANDS or (cmd == CMD_CALIBRATE_MAP and payload != CALIBRATE_MAP_PAYLOAD):
             raise ForbiddenCommand(f"command 0x{cmd:02X} is not allowed")
         if os.environ.get(READ_ONLY_ENV) and cmd not in RETRYABLE_COMMANDS:
             raise ForbiddenCommand(f"read-only mode: command 0x{cmd:02X} was not sent")

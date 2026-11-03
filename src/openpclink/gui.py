@@ -13,11 +13,11 @@ from . import __version__
 from .crypto import BadContainer, ProtectedFile
 from .database import MENU_ORDER, Database, DatabaseMissing, HelpManual, Parameter
 from .diagnostics import enable_log_file
-from .ecu import ENGINE_SPEED_ID, SECRET_IDS, Ecu, EcuProtected, StoreUnconfirmed, WriteMismatch, WriteRefused
+from .ecu import ENGINE_SPEED_ID, SECRET_IDS, TPS_CLOSED_ID, TPS_OPEN_ID, Ecu, EcuProtected, StoreUnconfirmed, WriteMismatch, WriteRefused
 from .importer import ImportFailed, import_pclink, rules_table_path
 from .logfile import PcLogger, read_log
 from .mapfile import MapError, MapFile, OfflineEcu, compare
-from .protocol import READ_ONLY_ENV, ForbiddenCommand, ProtocolError
+from .protocol import READ_ONLY_ENV, EcuError, ForbiddenCommand, ProtocolError
 from .native_rules import NativeRules, RulesTable
 from .views import GaugePanel, LogViewer, SurfaceView, axis_cell, heat_colour, used_axis_length
 from .transports import TransportError, list_ports, open_transport
@@ -34,6 +34,7 @@ class Worker(QtCore.QThread):
     wrote = QtCore.Signal(int, int)
     failed = QtCore.Signal(str)
     stored = QtCore.Signal()
+    controlled = QtCore.Signal(str)
     rules_status = QtCore.Signal(str)
     rules_messages = QtCore.Signal(list)
     visibility_changed = QtCore.Signal()
@@ -100,6 +101,8 @@ class Worker(QtCore.QThread):
             self._set_value(*args)
         elif name == "set_string":
             self._guarded(lambda: self.ecu.set_string(args[0], args[1]), args[0], 0)
+        elif name == "control":
+            self._control(*args)
         elif name == "store":
             try:
                 self.ecu.store()
@@ -107,6 +110,14 @@ class Worker(QtCore.QThread):
                 self.failed.emit(str(exc))
             else:
                 self.stored.emit()
+
+    def _control(self, action, done: str) -> None:
+        try:
+            action(self.ecu)
+        except (WriteRefused, WriteMismatch, ForbiddenCommand, EcuError) as exc:
+            self.failed.emit(str(exc))
+        else:
+            self.controlled.emit(done)
 
     def _rules_read(self, data_id: int, index: int = 0) -> float:
         try:
@@ -671,6 +682,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.status_label = QtWidgets.QLabel()
         self.unstored_label = QtWidgets.QLabel()
+        self.fault_label = QtWidgets.QLabel()
+        self.fault_label.setStyleSheet("color:#a12626;font-weight:bold")
+        self.statusBar().addPermanentWidget(self.fault_label)
         self.statusBar().addPermanentWidget(self.unstored_label)
         self.statusBar().addPermanentWidget(self.status_label)
         self._build_actions()
@@ -682,6 +696,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.wrote.connect(self._on_wrote)
         self.worker.failed.connect(self.show_error)
         self.worker.stored.connect(self._on_stored)
+        self.worker.controlled.connect(self._on_controlled)
         self.worker.rules_status.connect(self.statusBar().showMessage)
         self.worker.rules_messages.connect(lambda messages: self.show_error("\n\n".join(messages)))
         self.worker.visibility_changed.connect(self._on_visibility_changed)
@@ -706,6 +721,11 @@ class MainWindow(QtWidgets.QMainWindow):
         ecu_menu.addAction(self.store_action)
         ecu_menu.addAction(backup)
         ecu_menu.addAction(QtGui.QAction("ECU Status and Fault Codes…", self, triggered=self.show_status))
+        ecu_menu.addAction(QtGui.QAction("Clear ECU Fault Codes…", self, triggered=self.clear_faults))
+        ecu_menu.addAction(QtGui.QAction("Clear Statistics…", self, triggered=self.clear_statistics))
+        ecu_menu.addSeparator()
+        ecu_menu.addAction(QtGui.QAction("TPS Setup…", self, triggered=self.tps_setup))
+        ecu_menu.addAction(QtGui.QAction("MAP Sensor Calibration…", self, triggered=self.calibrate_map))
         toolbar = self.addToolBar("ECU")
         toolbar.setMovable(False)
         toolbar.addAction(self.connect_action)
@@ -979,6 +999,53 @@ class MainWindow(QtWidgets.QMainWindow):
             self.gauges.setItem(row, 1, QtWidgets.QTableWidgetItem(""))
         self.gauges.resizeColumnToContents(0)
 
+    def _show_fault(self, ecu) -> None:
+        if StatusWindow.FAULT_CODE_ID not in ecu.table or not ecu.get(StatusWindow.FAULT_CODE_ID):
+            self.fault_label.clear()
+            return
+        parameter = self.database.parameter(StatusWindow.FAULT_CODE_ID)
+        self.fault_label.setText(self._format_live(parameter, ecu.get(StatusWindow.FAULT_CODE_ID), 0, ""))
+
+    def _live_ecu(self) -> bool:
+        if isinstance(self.worker.ecu, Ecu):
+            return True
+        self.show_error("Connect to an ECU first.")
+        return False
+
+    def _confirm(self, title: str, message: str) -> bool:
+        choice = QtWidgets.QMessageBox.question(self, title, message)
+        return choice == QtWidgets.QMessageBox.StandardButton.Yes
+
+    def clear_faults(self) -> None:
+        if self._live_ecu() and self._confirm("Clear Fault Codes", "This will clear all fault codes stored in the ECU, are you sure?"):
+            self.worker.post("control", Ecu.clear_faults, "Fault codes cleared.")
+
+    def clear_statistics(self) -> None:
+        if self._live_ecu() and self._confirm("Clear Statistics", "Are you sure you want to clear ECU statistics?"):
+            self.worker.post("control", Ecu.clear_statistics, "Statistics cleared.")
+
+    def calibrate_map(self) -> None:
+        if self._live_ecu() and self._confirm("MAP Sensor Calibration", "Do you want to perform a MAP Sensor Calibration? Key on, engine stopped."):
+            self.worker.post("control", Ecu.calibrate_map, "MAP sensor calibrated. Check MAP matches BAP, then Store.")
+
+    def tps_setup(self) -> None:
+        if not self._live_ecu():
+            return
+        buttons = QtWidgets.QMessageBox.StandardButton
+        choice = QtWidgets.QMessageBox.information(
+            self, "TPS Span Adjustment", "Depress THROTTLE to fully OPEN position.", buttons.Ok | buttons.Cancel
+        )
+        if choice != buttons.Ok:
+            return
+        self.worker.post("control", lambda ecu: ecu.set_tps_span(TPS_OPEN_ID), "TPS open point saved.")
+        QtWidgets.QMessageBox.information(self, "TPS Span Adjustment", "Release THROTTLE to CLOSED position.")
+        self.worker.post("control", lambda ecu: ecu.set_tps_span(TPS_CLOSED_ID), "TPS closed point saved. Store to keep it.")
+
+    def _on_controlled(self, message: str) -> None:
+        self.statusBar().showMessage(message, 6000)
+        self._show_unstored()
+        self.form.refresh()
+
     def show_status(self) -> None:
         if not self.worker.ecu:
             self.show_error("Connect to an ECU or open a map first.")
@@ -992,6 +1059,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self.status_window is not None and self.status_window.isVisible():
             self.status_window.refresh()
+        self._show_fault(ecu)
         for row, data_id in enumerate(self.gauge_ids):
             parameter = self.database.parameter(data_id)
             decimals = parameter.decimals if parameter.decimals is not None else 1
@@ -1061,6 +1129,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if ecu and self.database.known(data_id) and self.database.parameter(data_id).children_by_option:
             self.form.show_parameters(self.form.parameters)  # Its option can show or hide others.
         self.form.refresh()
+        self._show_unstored()
+
+    def _show_unstored(self) -> None:
+        ecu = self.worker.ecu
         if ecu and ecu.has_unstored_changes:
             self.unstored_label.setText(
                 "Unsaved map changes" if isinstance(ecu, OfflineEcu) else "Unstored changes (F4 to store)"

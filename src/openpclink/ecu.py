@@ -29,6 +29,13 @@ ENGINE_SPEED_ID = 1000
 # Cylinders, Engine Type, Custom TDC Points. The rule behind its padlock is not
 # recovered, so other settings may be locked there too (docs/VERIFICATION.md).
 ENGINE_LOCKED_IDS = frozenset({2419, 2428, 2377})
+FAULT_CLEAR_ID = 1171
+TPS_RAW_ID = 1077
+TPS_OPEN_ID = 1704
+TPS_CLOSED_ID = 1703
+ETHROTTLE_MODE_ID = 1692
+ETHROTTLE_INACTIVE = (0, 3)  # OFF and Disabled.
+CALIBRATION_TIMEOUT = 1.5
 
 
 class EcuProtected(Exception):
@@ -370,6 +377,36 @@ class Ecu:
             ) from exc
         self.reload()
         self._dirty = False
+
+    def clear_faults(self) -> None:
+        """Ask the ECU to clear its fault codes, as PCLink does: by setting the CE Clear flag."""
+        if FAULT_CLEAR_ID not in self.table:
+            raise WriteRefused("this ECU has no fault clear flag")
+        loc = self.table[FAULT_CLEAR_ID]
+        dirty, before = self._dirty, self.memory[loc.offset]
+        self._write_memory(loc.offset, bytes([(before & ~loc.mask & 0xFF) | loc.mask]))
+        # The flag is a request, not a setting: it must not be resent with its neighbours or count as a tune change.
+        self.memory[loc.offset] = before & ~loc.mask & 0xFF
+        self._dirty = dirty
+
+    def clear_statistics(self) -> None:
+        self.link.request(p.CMD_CLEAR_STATISTICS)
+
+    def calibrate_map(self) -> None:
+        """Calibrate the MAP sensor to the barometric sensor, which needs the engine stopped."""
+        self._require_engine_stopped(p.CMD_CALIBRATE_MAP)
+        self.link.request(p.CMD_CALIBRATE_MAP, p.CALIBRATE_MAP_PAYLOAD, CALIBRATION_TIMEOUT)
+        self._dirty = True
+        self.reload()
+
+    def set_tps_span(self, data_id: int) -> float:
+        """Save the throttle's current voltage as its open or closed point, as PCLink's TPS Setup does."""
+        if data_id not in (TPS_OPEN_ID, TPS_CLOSED_ID) or TPS_RAW_ID not in self.table:
+            raise WriteRefused("this ECU does not support TPS setup")
+        self._require_engine_stopped(data_id)
+        if ETHROTTLE_MODE_ID in self.table and self.get(ETHROTTLE_MODE_ID) not in ETHROTTLE_INACTIVE:
+            raise WriteRefused("this ECU uses an electronic throttle, which needs its own calibration")
+        return self.set(data_id, round(self.get(TPS_RAW_ID), 2))
 
     def backup(self, path: Path) -> None:
         """Save a plain-text copy of the configuration, excluding secrets."""

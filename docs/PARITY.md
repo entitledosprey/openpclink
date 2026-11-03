@@ -13,10 +13,13 @@ Taken from the real program's menus, source modules and strings. Status means wh
 | Store to ECU | Built: PCLink capture; not run on the car |
 | Undo Short Term Changes, Load from ECU, Download to ECU | Missing |
 | ECU status and fault codes window | Done: sim |
-| Clear Fault Codes, Update and Clear Statistics | Missing |
+| Fault code in the status bar | Done: sim |
+| Clear Fault Codes, Clear Statistics | Built: commands captured from PCLink; not run on the car |
+| Update Statistics | Missing |
 | ECU log setup and download | Missing |
 | CAN setup dialog, CAN device, keypad and lambda forms | Missing (settings are in the menus) |
-| TPS setup, MAP sensor and Baro calibration, base timing, injection setup | Missing |
+| TPS setup (non-electronic throttle), MAP sensor calibration | Built: commands captured from PCLink; not run on the car |
+| E-throttle calibration, Baro calibration, base timing, injection setup | Missing |
 | Trigger scope | Missing |
 | Password setup and unlock, ECU and feature unlock | Missing: refused on purpose; a locked ECU stays locked |
 | Update Firmware, Restore to Factory Settings | Missing: blocked at protocol level; cannot be tested on the owner's car |

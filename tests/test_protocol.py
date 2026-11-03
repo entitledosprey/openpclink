@@ -143,3 +143,10 @@ def test_read_only_mode_never_sends_writes_or_store(monkeypatch, cmd):
 
 def test_read_only_mode_allows_only_commands_that_cannot_change_the_ecu(monkeypatch):
     assert p.RETRYABLE_COMMANDS == {0x00, 0x01, 0x03, 0x09, 0x0B, 0x0D, 0x16, 0x18, 0x1A, 0x32}
+
+
+@pytest.mark.parametrize("command", [p.CMD_CLEAR_STATISTICS, p.CMD_CALIBRATE_MAP])
+def test_read_only_mode_blocks_the_ecu_controls(monkeypatch, command):
+    monkeypatch.setenv(p.READ_ONLY_ENV, "1")
+    with pytest.raises(p.ForbiddenCommand):
+        p.Link(None).request(command)

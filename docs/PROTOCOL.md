@@ -82,3 +82,16 @@ tuner-encrypted, which this project refuses to open. Keys are read from the user
 
 `ECU.cfgr` is XML describing each DataId. `Languages.cfgr` is UTF-16 strings. `Parent` is string IDs
 joined by `\_`, and `CopyFromID` inherits properties from another parameter.
+
+## ECU controls (captured from real PCLink against the simulator; none has run on a real ECU)
+
+| Action | Request |
+|---|---|
+| Clear Fault Codes | Write config: sets the `CE Clear` flag, parameter 1171 (`02`, 1 byte, mask `0x80`) |
+| Clear Statistics | `2F`, no payload |
+| MAP Sensor Calibration | `1F`, payload `00 1F` + 8 zero bytes; PCLink treats any non-error reply as success |
+| TPS Setup | Write `TPS (Main) Open` (1704), then `Closed` (1703), each with `TPS Raw a/d` (1077) at 2 decimals |
+| Trigger scope capture | `26`, payload `00 0A 1B 58 0B B8` seen; reply format not decoded |
+| ECU log listing | `2E`, payload `00 00 00 04 01` + 13 zeros, then `1B`; reply format being decoded |
+
+`1F` also exists with no payload in the code; its purpose is unknown, so that form is refused.

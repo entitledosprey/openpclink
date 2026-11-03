@@ -1,6 +1,8 @@
 """Drives the real main window against the simulator, headless."""
 import os
+import struct
 import time
+from unittest import mock
 
 import pytest
 
@@ -368,3 +370,78 @@ def test_log_viewer_draws_every_plot_with_real_data_and_edge_cases(app):
         viewer.histogram.grab()
         viewer.plot.grab()
         viewer.close()
+
+
+def test_clear_faults_writes_the_flag_without_marking_the_tune_changed(session):
+    app, window, sim = session
+    window.worker.ecu._dirty = False
+    sim.writes.clear()
+    with mock.patch.object(QtWidgets.QMessageBox, "question", return_value=QtWidgets.QMessageBox.StandardButton.Yes):
+        window.clear_faults()
+    assert pump(app, lambda: sim.writes)
+    location = window.worker.ecu.table[1171]
+    offset, size = struct.unpack(">HH", sim.writes[0][:4])
+    assert offset + sim.runtime_size == location.offset and size == 1
+    assert sim.writes[0][4] & location.mask == location.mask
+    assert window.worker.ecu.memory[location.offset] & location.mask == 0
+    assert not window.worker.ecu.has_unstored_changes
+    sim.writes.clear()
+
+
+def test_clear_statistics_needs_a_yes(session):
+    app, window, sim = session
+    before = sim.statistics_cleared
+    with mock.patch.object(QtWidgets.QMessageBox, "question", return_value=QtWidgets.QMessageBox.StandardButton.No):
+        window.clear_statistics()
+    pump(app, lambda: False, 0.3)
+    assert sim.statistics_cleared == before
+    with mock.patch.object(QtWidgets.QMessageBox, "question", return_value=QtWidgets.QMessageBox.StandardButton.Yes):
+        window.clear_statistics()
+    assert pump(app, lambda: sim.statistics_cleared == before + 1)
+
+
+def _set_raw(sim, location, raw):
+    sim.memory[location.offset : location.offset + location.width] = raw.to_bytes(location.width, "big")
+
+
+def test_tps_setup_saves_the_voltage_rounded_as_pclink_writes_it(session):
+    from openpclink.ecu import ETHROTTLE_MODE_ID, TPS_OPEN_ID, TPS_RAW_ID
+
+    app, window, sim = session
+    ecu = window.worker.ecu
+    mode = ecu.table.get(ETHROTTLE_MODE_ID)
+    sim.engine_running = False
+    if mode is not None:
+        sim.memory[mode.offset] &= ~mode.mask & 0xFF
+        window.worker.post("control", lambda e: e.reload(), "")
+    _set_raw(sim, ecu.table[TPS_RAW_ID], 1444)  # PCLink wrote 0x05A0 when this read 1.444 V.
+    sim.writes.clear()
+    with mock.patch.object(QtWidgets.QMessageBox, "information", return_value=QtWidgets.QMessageBox.StandardButton.Ok):
+        window.tps_setup()
+    assert pump(app, lambda: len(sim.writes) == 2), window.errors
+    location = ecu.table[TPS_OPEN_ID]
+    assert sim.writes[0] == struct.pack(">HHH", location.offset - sim.runtime_size, 2, 1440)
+    sim.writes.clear()
+
+
+def test_tps_setup_and_map_calibration_refuse_while_the_engine_runs(session):
+    app, window, sim = session
+    sim.engine_running = True
+    before = sim.map_calibrations
+    sim.writes.clear()
+    failures = []
+    window.worker.failed.connect(failures.append)
+    with (
+        mock.patch.object(QtWidgets.QMessageBox, "information", return_value=QtWidgets.QMessageBox.StandardButton.Ok),
+        mock.patch.object(QtWidgets.QMessageBox, "question", return_value=QtWidgets.QMessageBox.StandardButton.Yes),
+        mock.patch.object(QtWidgets.QMessageBox, "warning"),
+    ):
+        window.tps_setup()
+        window.calibrate_map()
+        assert pump(app, lambda: len(failures) == 3), failures
+    assert sim.map_calibrations == before and sim.writes == []
+    window.worker.failed.disconnect(failures.append)
+    sim.engine_running = False
+    with mock.patch.object(QtWidgets.QMessageBox, "question", return_value=QtWidgets.QMessageBox.StandardButton.Yes):
+        window.calibrate_map()
+    assert pump(app, lambda: sim.map_calibrations == before + 1)

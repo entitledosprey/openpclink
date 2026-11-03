@@ -1,6 +1,7 @@
 """Desktop tuning interface. All ECU traffic runs on one worker thread."""
 from __future__ import annotations
 
+import logging
 import os
 import queue
 import sys
@@ -22,6 +23,7 @@ from .rules import FLAG_STARTUP, RulesEngine, RulesError
 from .views import GaugePanel, LogViewer, SurfaceView, axis_cell, heat_colour, used_axis_length
 from .transports import TransportError, list_ports, open_transport
 
+log = logging.getLogger("openpclink.gui")
 POLL_INTERVAL_S = 0.1
 ID_ROLE = QtCore.Qt.ItemDataRole.UserRole
 GAUGE_CAPTIONS = ("Engine Speed", "MAP", "ECT", "IAT", "Batt Voltage", "TPS (Main)", "Lambda 1", "Ignition Angle")
@@ -34,7 +36,6 @@ class Worker(QtCore.QThread):
     wrote = QtCore.Signal(int, int)
     failed = QtCore.Signal(str)
     stored = QtCore.Signal()
-    related = QtCore.Signal(list)
     rules_messages = QtCore.Signal(list)
     rules_status = QtCore.Signal(str)
     visibility_changed = QtCore.Signal()
@@ -159,8 +160,10 @@ class Worker(QtCore.QThread):
             self.rules_messages.emit(messages)
         if self.rules.visibility_changed:
             self.visibility_changed.emit()
-        if changes:
-            self.related.emit(changes)
+        # Real PCLink was seen not to make a change the rules asked for (2754 -> 3460 = 56),
+        # so these are recorded for comparison and never sent.
+        for change in changes:
+            log.info("rules asked for %s[%s] = %s after %s changed; not applied", change.data_id, change.index, change.value, data_id)
 
     def _guarded(self, action, data_id: int, index: int) -> None:
         try:
@@ -612,7 +615,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.wrote.connect(self._on_wrote)
         self.worker.failed.connect(self.show_error)
         self.worker.stored.connect(self._on_stored)
-        self.worker.related.connect(self._on_related)
         self.worker.rules_messages.connect(lambda messages: self.show_error("\n\n".join(messages)))
         self.worker.rules_status.connect(self.statusBar().showMessage)
         self.worker.visibility_changed.connect(self._on_visibility_changed)
@@ -903,24 +905,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tree.blockSignals(True)
             self.tree.setCurrentItem(found)
             self.tree.blockSignals(False)
-
-    def describe_change(self, change) -> str:
-        known = self.database.known(change.data_id)
-        name = self.database.parameter(change.data_id).caption if known else f"Parameter {change.data_id}"
-        return f"{name}: {change.value:g}"
-
-    def confirm_related(self, changes: list) -> bool:
-        listing = "\n".join(self.describe_change(change) for change in changes)
-        answer = QtWidgets.QMessageBox.question(
-            self, "Related settings",
-            f"PCLink would also change these settings alongside your edit:\n\n{listing}\n\nApply them?",
-        )
-        return answer == QtWidgets.QMessageBox.StandardButton.Yes
-
-    def _on_related(self, changes: list) -> None:
-        if self.confirm_related(changes):
-            for change in changes:
-                self.write(change.data_id, change.value, change.index)
 
     def choose_option(self, data_id: int, option: int) -> None:
         warning = self.database.warning_for(data_id, option)

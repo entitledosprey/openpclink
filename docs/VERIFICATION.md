@@ -71,9 +71,9 @@ contents of write replies (handled by reading back if not an echo), timing, and 
 ## Known gaps
 
 - `D_menu.dll` now runs in an emulator, and its hiding matches real PCLink on the RPM Limit form in both states. Other
-  forms have not been compared. It also asks for related changes: 2754 (RPM Limit Mode) set to 1 asks for 3460 = 56, a
-  table allocation, yet the capture of real PCLink making that change showed no such write. The reason is not yet
-  known, so the app asks before applying these.
+  forms have not been compared. It also asks for related changes: 2754 (RPM Limit Mode) set to 1 asks for 3460 = 56. Real
+  PCLink under Wine, same map and change, wrote only the mode byte and T1 stayed OFF. Why is not known, so the app logs
+  these and never sends them. Any related changes PCLink really makes are therefore missing here.
 - Only 3 engine-running locks were observed, on one form. PCLink's rule was not recovered, and other
   settings may be padlocked there but **writable here with the engine running**.
 - Parameter limits come from Link's database; PCLink may apply further checks in its forms that were

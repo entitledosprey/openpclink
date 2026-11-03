@@ -61,8 +61,6 @@ def session(app, database):
     window.show()
     window.errors = []
     window.show_error = window.errors.append
-    window.related_asked = []
-    window.confirm_related = lambda changes: (window.related_asked.append(changes), False)[1]
     window.worker.failed.disconnect()
     window.worker.failed.connect(window.show_error)
     window.connect_to(f"serial:{server.path}")
@@ -317,10 +315,11 @@ def test_pclinks_rules_decide_what_the_form_shows_like_the_real_program(session)
     assert pump(app, lambda: _captions(window) == ["RPM Limit Mode", "Dual Tables", "Advanced Mode"])
 
 
-def test_related_changes_are_asked_about_and_not_sent_unless_approved(session):
+def test_only_what_real_pclink_sends_is_sent_when_a_mode_changes(session):
+    """Real PCLink, same map and change: one write, and T1 stays OFF, whatever the rules ask."""
     app, window, sim = session
     window.write(2754, 1, 0)
-    assert pump(app, lambda: window.related_asked)
-    assert [(c.data_id, c.value) for c in window.related_asked[0]] == [(3460, 56.0)]
-    pump(app, lambda: False, timeout=0.3)
+    assert pump(app, lambda: sim.writes)
+    pump(app, lambda: False, timeout=0.5)
     assert sim.writes == [bytes.fromhex("37b3000120")]
+    assert window.worker.ecu.get(3460) == 0

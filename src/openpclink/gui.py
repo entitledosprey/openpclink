@@ -292,6 +292,10 @@ class ParameterForm(QtWidgets.QWidget):
             combo.installEventFilter(self._wheel_guard)
             return combo
         if loc.count > 1 and not loc.is_bitfield:
+            if len(self.parameters) > 1 and parameter.is_table:
+                button = QtWidgets.QPushButton("Open table…")
+                button.clicked.connect(lambda: self.window_.open_table_entry(data_id))
+                return button
             return TableEditor(self.window_, parameter, loc.count, read_only)
         spin = QtWidgets.QDoubleSpinBox()
         spin.setKeyboardTracking(False)
@@ -336,6 +340,8 @@ class ParameterForm(QtWidgets.QWidget):
                 editor.setEnabled(False)
 
     def _refresh_editor(self, ecu: Ecu, data_id: int, editor: QtWidgets.QWidget) -> None:
+        if isinstance(editor, QtWidgets.QPushButton):
+            return
         if isinstance(editor, QtWidgets.QLineEdit):
             if not editor.hasFocus():
                 editor.setText(ecu.get_string(data_id))
@@ -739,7 +745,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if data_id in SECRET_IDS or not self.database.known(data_id) or self._is_live(data_id) != live:
                 continue
             parameter = self.database.parameter(data_id)
-            if parameter.path:
+            if parameter.path and (live or not parameter.is_runtime_value):
                 groups[parameter.path].append(data_id)
         return {
             path: ids for path, ids in groups.items() if any(self.parameter_visible(i) for i in ids)
@@ -757,6 +763,26 @@ class MainWindow(QtWidgets.QMainWindow):
                     nodes[prefix] = QtWidgets.QTreeWidgetItem(parent or tree, [prefix[-1]])
             nodes[path].setData(0, ID_ROLE, groups[path])
 
+    def _add_table_entries(self, groups: dict) -> None:
+        """PCLink gives each table its own menu entry under its form."""
+        nodes = {}
+
+        def index(item: QtWidgets.QTreeWidgetItem, path: tuple[str, ...]) -> None:
+            nodes[path] = item
+            for child in range(item.childCount()):
+                index(item.child(child), path + (item.child(child).text(0),))
+
+        for top in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(top)
+            index(item, (item.text(0),))
+        ecu = self.worker.ecu
+        for path, ids in groups.items():
+            tables = [i for i in ids if ecu.table[i].count > 1 and not ecu.table[i].is_bitfield and self.database.parameter(i).is_table]
+            for data_id in sorted(tables, key=lambda i: -self.database.parameter(i).priority):
+                if self.parameter_visible(data_id):
+                    entry = QtWidgets.QTreeWidgetItem(nodes[path], [self.database.parameter(data_id).caption])
+                    entry.setData(0, ID_ROLE, [data_id])
+
     def _build_tree(self) -> None:
         groups = self._groups(live=False)
         priority = {path: max(self.database.parameter(i).priority for i in ids) for path, ids in groups.items()}
@@ -766,6 +792,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return (top, path[0], -priority[path] if len(path) > 1 else 0, path)
 
         self._fill_tree(self.tree, groups, sort_key)
+        self._add_table_entries(groups)
 
     def _build_runtime_tree(self) -> None:
         tree = self.runtime_tree
@@ -825,8 +852,27 @@ class MainWindow(QtWidgets.QMainWindow):
         for index in range(self.tree.topLevelItemCount()):
             visit(self.tree.topLevelItem(index))
 
+    def _form_ids(self, item: QtWidgets.QTreeWidgetItem) -> list[int]:
+        """A folder with no settings of its own shows its children's, as in PCLink."""
+        ids = list(item.data(0, ID_ROLE) or [])
+        if not ids:
+            for child in range(item.childCount()):
+                for data_id in self._form_ids(item.child(child)):
+                    if data_id not in ids:
+                        ids.append(data_id)
+        return ids
+
+    def open_table_entry(self, data_id: int) -> None:
+        stack = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())]
+        while stack:
+            item = stack.pop()
+            if item.data(0, ID_ROLE) == [data_id]:
+                self.tree.setCurrentItem(item)
+                return
+            stack.extend(item.child(i) for i in range(item.childCount()))
+
     def _tree_selected(self, item: QtWidgets.QTreeWidgetItem | None, _previous) -> None:
-        ids = (item.data(0, ID_ROLE) or []) if item else []
+        ids = self._form_ids(item) if item else []
         self.form.show_parameters([self.database.parameter(i) for i in ids])
         if self.right_tabs.currentWidget() is self.help_view:
             self.show_help()

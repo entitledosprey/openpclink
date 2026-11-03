@@ -83,10 +83,15 @@ class Parameter:
     active_zone: int | None = None
     column_source_id: int | None = None
     row_source_id: int | None = None
+    kind: int | None = None
 
     @property
     def is_table(self) -> bool:
         return self.rows * self.columns > 1
+
+    @property
+    def is_runtime_value(self) -> bool:
+        return self.kind == 4
 
 
 class Database:
@@ -167,6 +172,7 @@ class Database:
             active_zone=_int(prop("ActiveZone")),
             column_source_id=_int(prop("XAxisParameterID")),
             row_source_id=_int(prop("YAxisParameterID")),
+            kind=_int(prop("Type")),
         )
         self._cache[data_id] = parameter
         return parameter

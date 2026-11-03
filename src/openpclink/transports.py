@@ -23,7 +23,7 @@ FT232H_BAUD = 4_700_000
 FTDI_X_BAUD = 1_171_875
 WIFI_PORT = 10470
 FTDI_LATENCY_MS = 16
-QUEUED_USB_ENV = "OPENPCLINK_QUEUED_USB"
+PLAIN_USB_ENV = "OPENPCLINK_PLAIN_USB"
 
 
 log = logging.getLogger("openpclink.transports")
@@ -155,20 +155,22 @@ class FtdiTransport:
         self._queued = self._start_queued_reads()
 
     def _start_queued_reads(self):
-        """Queued reads, if enabled. Plain reads still work, with retries.
-
-        Off by default until it has been proven on real hardware: it hands buffers to the kernel.
-        """
-        if not os.environ.get(QUEUED_USB_ENV):
+        """Prefer queued reads; plain reads still work, with retries, if these cannot start."""
+        if os.environ.get(PLAIN_USB_ENV):
             return None
+        import usb.core
+        import usb.util
+
         from .queued_usb import QueuedReader
 
         try:
             device = self._ftdi.usb_dev
+            usb.util.claim_interface(device, self._ftdi._index - 1)
             backend = device.backend
             handle = device._ctx.handle.handle
-            reader = QueuedReader(backend.lib, backend.ctx, handle, self._ftdi._in_ep, self._ftdi._max_packet_size)
-        except (AttributeError, OSError, ValueError, TypeError) as exc:
+            # pyftdi names endpoints from the chip's side: its "out" is what the computer reads.
+            reader = QueuedReader(backend.lib, backend.ctx, handle, self._ftdi._out_ep, self._ftdi._max_packet_size)
+        except (AttributeError, OSError, ValueError, TypeError, usb.core.USBError) as exc:
             log.info("queued USB reads unavailable: %s", exc)
             return None
         if reader.failed:

@@ -14,6 +14,7 @@ _COMPLETED = 0
 _TIMED_OUT = 2
 _CANCELLED = 3
 _BULK = 2
+_ENDPOINT_IN = 0x80
 
 
 class _Timeval(Structure):
@@ -48,6 +49,8 @@ def strip_status(data: bytes, packet_size: int) -> bytes:
 
 class QueuedReader:
     def __init__(self, lib, ctx, handle, endpoint: int, packet_size: int) -> None:
+        if not endpoint & _ENDPOINT_IN:  # A queue on an output endpoint streams its buffers at the ECU.
+            raise ValueError(f"USB endpoint {endpoint:#x} is not an input")
         self._lib, self._ctx = lib, ctx
         self._packet_size = packet_size
         self.data = bytearray()

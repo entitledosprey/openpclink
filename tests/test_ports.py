@@ -1,4 +1,5 @@
 """Port detection and FTDI setup, with USB faked. This is not a hardware test."""
+import pytest
 from types import SimpleNamespace
 from unittest import mock
 
@@ -44,6 +45,13 @@ def test_queued_reads_remove_each_packets_status_bytes():
 
     packet = b"\x01\x60" + bytes(range(10))
     assert strip_status(packet + packet[:5], 12) == bytes(range(10)) + bytes(range(3))
+
+
+def test_queued_reads_refuse_an_endpoint_that_sends_to_the_ecu():
+    from openpclink.queued_usb import QueuedReader
+
+    with pytest.raises(ValueError, match="not an input"):
+        QueuedReader(None, None, None, 0x02, 512)
 
 
 def test_ftdi_is_configured_as_pclink_configures_it():

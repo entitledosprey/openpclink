@@ -10,18 +10,18 @@ damage an engine. To run with writes blocked at the protocol layer, start it wit
 
 ## Install
 
-Download from this repo's [v0.2.0 release](https://github.com/entitledosprey/openpclink/releases/tag/v0.2.0),
-or with the GitHub CLI: `gh release download v0.2.0 -R entitledosprey/openpclink -p '<file>'`.
+Download from this repo's [v0.2.1 release](https://github.com/entitledosprey/openpclink/releases/tag/v0.2.1),
+or with the GitHub CLI: `gh release download v0.2.1 -R entitledosprey/openpclink -p '<file>'`.
 
 The packages contain Link's parameter data, so **keep this repo private and do not share them**;
 they are not licensed for redistribution.
 
 | System | File | Install |
 |---|---|---|
-| macOS (Apple Silicon) | `OpenPCLink-0.2.0-macos-arm64.dmg` | Open it, drag to Applications, then see below |
-| Debian/Ubuntu x86-64 | `openpclink_0.2.0_amd64.deb` | `sudo apt install ./openpclink_0.2.0_amd64.deb` |
-| Debian/Ubuntu ARM64 | `openpclink_0.2.0_arm64.deb` | `sudo apt install ./openpclink_0.2.0_arm64.deb` |
-| Other Linux | `OpenPCLink-0.2.0-linux-*.tar.gz` | Unpack, run `OpenPCLink`, install `packaging/70-link-ecu.rules` to `/etc/udev/rules.d/` |
+| macOS (Apple Silicon) | `OpenPCLink-0.2.1-macos-arm64.dmg` | Open it, drag to Applications, then see below |
+| Debian/Ubuntu x86-64 | `openpclink_0.2.1_amd64.deb` | `sudo apt install ./openpclink_0.2.1_amd64.deb` |
+| Debian/Ubuntu ARM64 | `openpclink_0.2.1_arm64.deb` | `sudo apt install ./openpclink_0.2.1_arm64.deb` |
+| Other Linux | `OpenPCLink-0.2.1-linux-*.tar.gz` | Unpack, run `OpenPCLink`, install `packaging/70-link-ecu.rules` to `/etc/udev/rules.d/` |
 
 **macOS:** the app is not notarised, so a downloaded copy is blocked until you clear its quarantine flag.
 This has not been tested on a second Mac:

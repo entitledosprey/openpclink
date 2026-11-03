@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_submodules
 
-hiddenimports = ['openpclink.cli', 'openpclink.gui', 'serial.tools.list_ports']
+hiddenimports = ['openpclink.cli', 'openpclink.gui', 'openpclink.link_helper', 'serial.tools.list_ports']
 hiddenimports += collect_submodules('pyftdi')
 hiddenimports += collect_submodules('usb')
 

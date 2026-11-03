@@ -283,7 +283,9 @@ def open_transport(uri: str) -> Transport:
         path, _, baud = rest.partition("@")
         return SerialTransport(path, int(baud) if baud else SERIAL_BAUD)
     if scheme == "ftdi" and rest:
-        return FtdiTransport(int(rest, 16))
+        from .link_helper import IsolatedFtdiTransport
+
+        return IsolatedFtdiTransport(int(rest, 16))
     if scheme == "udp" and rest:
         host, _, port = rest.partition(":")
         return UdpTransport(host, int(port) if port else WIFI_PORT)

@@ -34,8 +34,9 @@ five further reads showed none. Which bytes they were was not captured, so the c
 Running Time and Num of Starts were seen to change by themselves, so comparisons now ignore statistics, but those
 changes persisted and that earlier one did not, so this is not a proven explanation.
 
-**Open issue:** with the GUI connected to this ECU, polls were cut short every few seconds (for example `1759 of 1954`
-bytes), and retries recovered them. The unpaced soak without a GUI had no such failures. The cause is not confirmed.
+**Fixed in 0.2.1:** with the GUI running in the same process, about 20% of polls lost bytes, and a shorter thread
+switch interval did not help. Running the FTDI link in its own process cut that to under 1% (2-3 of about 350),
+with retries recovering those. The cause of the remainder is unknown.
 
 ## Not verified
 

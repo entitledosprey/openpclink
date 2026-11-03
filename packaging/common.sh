@@ -11,7 +11,7 @@ PY
     pyinstaller --noconfirm --clean --name OpenPCLink \
         --paths src \
         --add-data "src/openpclink/data:openpclink/data" \
-        --hidden-import openpclink.cli --hidden-import openpclink.gui \
+        --hidden-import openpclink.cli --hidden-import openpclink.gui --hidden-import openpclink.link_helper \
         --hidden-import serial.tools.list_ports \
         --collect-submodules pyftdi --collect-submodules usb \
         --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.QtWebEngineWidgets \

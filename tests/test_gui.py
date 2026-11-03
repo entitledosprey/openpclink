@@ -351,3 +351,20 @@ def test_status_window_shows_the_active_fault_and_sends_nothing(session):
     assert pump(app, lambda: code in status.fault.text())
     assert sim.writes == []
     status.close()
+
+
+def test_log_viewer_draws_every_plot_with_real_data_and_edge_cases(app):
+    from openpclink.logfile import Log
+    from openpclink.views import LogViewer
+
+    for log in (
+        Log(["RPM", "MAP"], [0.0, 0.1, 0.2], [[800.0, 900.0, 1000.0], [40.0, 40.0, 40.0]]),
+        Log(["RPM"], [0.0], [[800.0]]),
+        Log(["RPM"], [], [[]]),
+    ):
+        viewer = LogViewer(log, "test")
+        viewer.show()
+        viewer.xy.grab()
+        viewer.histogram.grab()
+        viewer.plot.grab()
+        viewer.close()

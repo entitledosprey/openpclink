@@ -226,6 +226,73 @@ class LogPlot(QtWidgets.QWidget):
         painter.drawLine(QtCore.QPointF(x, 0), QtCore.QPointF(x, height))
 
 
+def histogram_bins(values: list[float], bins: int) -> tuple[list[int], float, float]:
+    """Counts per equal-width bin, with the range they cover."""
+    if not values or bins < 1:
+        return [], 0.0, 0.0
+    low, high = min(values), max(values)
+    counts = [0] * bins
+    width = (high - low) / bins
+    for value in values:
+        counts[min(int((value - low) / width), bins - 1) if width else 0] += 1
+    return counts, low, high
+
+
+class XYPlot(QtWidgets.QWidget):
+    """One channel against another, as dots."""
+
+    def __init__(self, log: Log) -> None:
+        super().__init__()
+        self.log = log
+        self.x_channel = 0
+        self.y_channel = 1 if len(log.names) > 1 else 0
+        self.setMinimumSize(420, 320)
+
+    def paintEvent(self, _event: QtGui.QPaintEvent) -> None:
+        painter = QtGui.QPainter(self)
+        painter.fillRect(self.rect(), self.palette().base())
+        if not self.log.time:
+            return
+        xs, ys = self.log.channels[self.x_channel], self.log.channels[self.y_channel]
+        x_low, x_span = min(xs), (max(xs) - min(xs)) or 1.0
+        y_low, y_span = min(ys), (max(ys) - min(ys)) or 1.0
+        width, height = self.width() - 20, self.height() - 20
+        painter.setPen(QtGui.QPen(QtGui.QColor(_LOG_COLOURS[0]), 2))
+        step = max(len(xs) // 5000, 1)
+        for x, y in zip(xs[::step], ys[::step]):
+            painter.drawPoint(QtCore.QPointF(10 + (x - x_low) / x_span * width, 10 + height - (y - y_low) / y_span * height))
+
+
+class HistogramPlot(QtWidgets.QWidget):
+    """How long one channel spent at each value."""
+
+    BINS = 40
+
+    def __init__(self, log: Log) -> None:
+        super().__init__()
+        self.log = log
+        self.channel = 0
+        self.setMinimumSize(420, 320)
+
+    def paintEvent(self, _event: QtGui.QPaintEvent) -> None:
+        painter = QtGui.QPainter(self)
+        painter.fillRect(self.rect(), self.palette().base())
+        if not self.log.time:
+            return
+        counts, low, high = histogram_bins(self.log.channels[self.channel], self.BINS)
+        tallest = max(counts) or 1
+        width = self.width() / len(counts)
+        height = self.height() - 24
+        painter.setBrush(QtGui.QColor(_LOG_COLOURS[0]))
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        for index, count in enumerate(counts):
+            bar = count / tallest * height
+            painter.drawRect(QtCore.QRectF(index * width, height - bar, max(width - 1, 1), bar))
+        painter.setPen(self.palette().text().color())
+        painter.drawText(4, self.height() - 6, f"{low:g}")
+        painter.drawText(max(self.width() - 80, 40), self.height() - 6, f"{high:g}")
+
+
 class LogViewer(QtWidgets.QWidget):
     def __init__(self, log: Log, title: str) -> None:
         super().__init__()
@@ -251,8 +318,42 @@ class LogViewer(QtWidgets.QWidget):
         splitter.addWidget(self.plot)
         splitter.addWidget(self.channels)
         splitter.setSizes([800, 300])
-        QtWidgets.QVBoxLayout(self).addWidget(splitter)
+        self.xy = XYPlot(log)
+        self.x_choice, self.y_choice = self._channel_choice(self.xy.x_channel), self._channel_choice(self.xy.y_channel)
+        self.x_choice.currentIndexChanged.connect(self._sync_xy)
+        self.y_choice.currentIndexChanged.connect(self._sync_xy)
+        xy_page = QtWidgets.QWidget()
+        xy_layout = QtWidgets.QFormLayout(xy_page)
+        xy_layout.addRow("X axis", self.x_choice)
+        xy_layout.addRow("Y axis", self.y_choice)
+        xy_layout.addRow(self.xy)
+        self.histogram = HistogramPlot(log)
+        self.histogram_choice = self._channel_choice(0)
+        self.histogram_choice.currentIndexChanged.connect(self._sync_histogram)
+        histogram_page = QtWidgets.QWidget()
+        histogram_layout = QtWidgets.QFormLayout(histogram_page)
+        histogram_layout.addRow("Channel", self.histogram_choice)
+        histogram_layout.addRow(self.histogram)
+        tabs = QtWidgets.QTabWidget()
+        tabs.addTab(splitter, "Time Plot")
+        tabs.addTab(xy_page, "XY Plot")
+        tabs.addTab(histogram_page, "Histogram")
+        QtWidgets.QVBoxLayout(self).addWidget(tabs)
         self._sync()
+
+    def _channel_choice(self, current: int) -> QtWidgets.QComboBox:
+        choice = QtWidgets.QComboBox()
+        choice.addItems(self.log.names)
+        choice.setCurrentIndex(current)
+        return choice
+
+    def _sync_xy(self) -> None:
+        self.xy.x_channel, self.xy.y_channel = self.x_choice.currentIndex(), self.y_choice.currentIndex()
+        self.xy.update()
+
+    def _sync_histogram(self) -> None:
+        self.histogram.channel = self.histogram_choice.currentIndex()
+        self.histogram.update()
 
     def _sync(self) -> None:
         self.plot.shown = [

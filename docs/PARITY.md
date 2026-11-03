@@ -59,9 +59,9 @@ Taken from the real program's menus, source modules and strings. Status means wh
 
 | Feature | Status |
 |---|---|
-| PC logging to CSV, time plot | Done: sim |
+| PC logging to CSV, time plot, XY plot, histogram | Done: sim |
 | PCLink log file format, log file manager | Missing |
-| Navigator, XY plot, histogram, parameter list, drag and section tools, export | Missing |
+| Navigator, parameter list, drag and section tools, export | Missing |
 
 ## Other
 

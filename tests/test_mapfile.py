@@ -9,7 +9,7 @@ from openpclink.logfile import PcLogger, read_log
 from openpclink.mapfile import MapFile, OfflineEcu, compare
 from openpclink.sim import PtyServer, SimEcu
 from openpclink.transports import SerialTransport
-from openpclink.views import axis_cell, heat_colour
+from openpclink.views import axis_cell, heat_colour, histogram_bins
 
 
 @pytest.fixture(scope="module")
@@ -138,3 +138,12 @@ def test_heat_runs_from_cold_to_hot():
     assert heat_colour(0, 0, 10)[2] > heat_colour(0, 0, 10)[0]
     assert heat_colour(10, 0, 10)[0] > heat_colour(10, 0, 10)[2]
     assert heat_colour(5, 5, 5)
+
+
+def test_histogram_counts_every_sample_including_the_extremes():
+    counts, low, high = histogram_bins([0.0, 1.0, 1.0, 4.0], 4)
+    assert (low, high) == (0.0, 4.0)
+    assert counts == [1, 2, 0, 1]
+    assert sum(counts) == 4
+    assert histogram_bins([5.0, 5.0], 3)[0] == [2, 0, 0]
+    assert histogram_bins([], 3)[0] == []

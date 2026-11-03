@@ -9,8 +9,8 @@ Read from real PCLink 7.8.2 under Wine. ✅ exists here, 🟡 partial, ❌ missi
 
 | Menu | Items |
 |---|---|
-| File | ✅ Open, ✅ Save, ✅ Save as, ❌ Save as Encrypted, ✅ Compare, ❌ Compare Close, ❌ Show Memo, ✅ Exit |
-| Options | 🟡 Connection, ❌ Preferences, ❌ Directories, ❌ Colour Theme, ❌ Units, ❌ Language, ✅ Setup ECU Parameters |
+| File | ✅ Open, ❌ Save, ✅ Save as, ❌ Save as Encrypted, ✅ Compare, ❌ Compare Close, ❌ Show Memo, ❌ Exit |
+| Options | 🟡 Connection, ❌ Preferences, ❌ Directories, ❌ Colour Theme, ❌ Units, ❌ Language, ❌ Setup ECU Parameters |
 | ECU Controls | ✅ Disconnect, ✅ Search, ❌ Update Firmware, ✅ Clear Fault Codes, ❌ ECU Log File Setup, ❌ ECU Log File Download, ❌ CAN Setup, ✅ Show Statistics, ✅ Clear Statistics, ✅ Store, ❌ ECU Unlock, ❌ Restore to Factory Settings, ❌ Setup Password, ❌ Unlock Password, 🟡 TPS Setup (no electronic throttle), ✅ MAP Sensor Calibration, ❌ Trigger Scope |
 | Display Mode | ✅ ECU, 🟡 Log Analysis, ❌ Full Screen with Menus, ❌ Full Screen |
 | Layout | ❌ New, ❌ Load, ❌ Save As, ❌ New Page, ❌ Delete Page, ❌ Rename Page, ❌ Configuration, ❌ Tuning, ❌ Logging, ❌ Mixture Map |

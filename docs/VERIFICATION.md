@@ -37,7 +37,8 @@ changes persisted and that earlier one did not, so this is not a proven explanat
 **Partly fixed in 0.2.1:** with the GUI running in the same process, about 20% of polls lost bytes. Running the FTDI
 link in its own process gave 2-3 of about 350 in one session, but 27 of 239 (about 11%) in a later one, on battery. The
 FT232H overflows if unread for about 2 ms, and the cause of the variation is not confirmed. Retries recover these, and
-replies are checked by CRC, so live values can stutter but should not be wrong.
+replies are checked by CRC, so live values can stutter but should not be wrong. Queued USB reads aim to fix this, but have
+never run on hardware, so they are off unless `OPENPCLINK_QUEUED_USB=1` is set.
 
 **Native rules on this ECU's tune:** against the DLL, 9 of 8,684 visibility answers differ, none among the 1,119 where
 the rules change the answer. That tune helped train the table. With rules learned from it left out, 27 differ, 6 of them

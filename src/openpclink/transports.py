@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import ctypes.util
 import errno
+import logging
+import os
 import socket
 import sys
 import time
@@ -21,6 +23,10 @@ FT232H_BAUD = 4_700_000
 FTDI_X_BAUD = 1_171_875
 WIFI_PORT = 10470
 FTDI_LATENCY_MS = 16
+QUEUED_USB_ENV = "OPENPCLINK_QUEUED_USB"
+
+
+log = logging.getLogger("openpclink.transports")
 
 
 def _use_bundled_libusb() -> None:
@@ -146,6 +152,29 @@ class FtdiTransport:
             self._ftdi.set_latency_timer(FTDI_LATENCY_MS)
         except (FtdiError, UsbToolsError, ValueError, OSError) as exc:
             raise TransportError(_ftdi_open_message(exc)) from exc
+        self._queued = self._start_queued_reads()
+
+    def _start_queued_reads(self):
+        """Queued reads, if enabled. Plain reads still work, with retries.
+
+        Off by default until it has been proven on real hardware: it hands buffers to the kernel.
+        """
+        if not os.environ.get(QUEUED_USB_ENV):
+            return None
+        from .queued_usb import QueuedReader
+
+        try:
+            device = self._ftdi.usb_dev
+            backend = device.backend
+            handle = device._ctx.handle.handle
+            reader = QueuedReader(backend.lib, backend.ctx, handle, self._ftdi._in_ep, self._ftdi._max_packet_size)
+        except (AttributeError, OSError, ValueError, TypeError) as exc:
+            log.info("queued USB reads unavailable: %s", exc)
+            return None
+        if reader.failed:
+            reader.close()
+            return None
+        return reader
 
     def write(self, data: bytes) -> int:
         try:
@@ -154,6 +183,8 @@ class FtdiTransport:
             raise TransportError(f"USB write failed: {exc}") from exc
 
     def read(self, size: int, timeout: float) -> bytes:
+        if self._queued is not None:
+            return self._read_queued(size, timeout)
         out = bytearray()
         deadline = time.monotonic() + timeout
         try:
@@ -163,13 +194,33 @@ class FtdiTransport:
             raise TransportError(f"USB read failed: {exc}") from exc
         return bytes(out)
 
+    def _read_queued(self, size: int, timeout: float) -> bytes:
+        reader = self._queued
+        deadline = time.monotonic() + timeout
+        while len(reader.data) < size:
+            left = deadline - time.monotonic()
+            if reader.failed:
+                raise TransportError("USB read failed")
+            if left <= 0:
+                reader.pump(0)
+                break
+            reader.pump(min(left, 0.02))
+        out = bytes(reader.data[:size])
+        del reader.data[:size]
+        return out
+
     def purge(self) -> None:
+        if self._queued is not None:
+            self._queued.pump(0)
+            self._queued.data.clear()
         try:
             self._ftdi.purge_rx_buffer()
         except (self._error, OSError) as exc:
             raise TransportError(f"USB purge failed: {exc}") from exc
 
     def close(self) -> None:
+        if self._queued is not None:
+            self._queued.close()
         self._ftdi.close()
 
 

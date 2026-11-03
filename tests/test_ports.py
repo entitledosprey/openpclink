@@ -39,6 +39,13 @@ def _open_ftdi(hi_speed):
     return device
 
 
+def test_queued_reads_remove_each_packets_status_bytes():
+    from openpclink.queued_usb import strip_status
+
+    packet = b"\x01\x60" + bytes(range(10))
+    assert strip_status(packet + packet[:5], 12) == bytes(range(10)) + bytes(range(3))
+
+
 def test_ftdi_is_configured_as_pclink_configures_it():
     device = _open_ftdi(True)
     device.open.assert_called_once_with(transports.FTDI_VID, 0x7068, serial=None)

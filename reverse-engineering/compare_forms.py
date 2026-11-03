@@ -51,6 +51,7 @@ for title, rows in seen.items():
     for _folder, captions in candidates:
         extra = [c for c in captions[:16] if not any(same(c, r) for r in rows)]
         lost = [r for r in rows if not any(same(c, r) for c in captions)]
+        # Forms can share a name; a form is matched by the one it resembles most.
         if best is None or len(extra) + len(lost) < len(best[0]) + len(best[1]):
             best = (extra, lost)
     (result["match"].append(title) if not best[0] and not best[1] else result["differ"].append({"form": title, "only_here": best[0], "only_real": best[1]}))

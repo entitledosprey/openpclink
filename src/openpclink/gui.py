@@ -732,10 +732,14 @@ class MainWindow(QtWidgets.QMainWindow):
         ecu = self.worker.ecu
         groups: dict[tuple[str, ...], list[int]] = defaultdict(list)
         for data_id in ecu.table:
-            if data_id in SECRET_IDS or not self.database.known(data_id) or self._is_live(data_id) != live:
+            if data_id in SECRET_IDS or not self.database.known(data_id):
                 continue
             parameter = self.database.parameter(data_id)
-            if parameter.path and (live or not parameter.is_runtime_value):
+            # PCLink lists statistics among the settings, though they are live values.
+            statistics = parameter.path[:1] == ("Statistics",)
+            if self._is_live(data_id) != live and not (statistics and not live):
+                continue
+            if parameter.path and (live or statistics or not parameter.is_runtime_value):
                 groups[parameter.path].append(data_id)
         return {
             path: ids for path, ids in groups.items() if any(self.parameter_visible(i) for i in ids)

@@ -186,12 +186,12 @@ class Database:
                     self._controllers.setdefault(child, []).append(data_id)
         return self._controllers
 
-    def is_visible(self, data_id: int, link_id: int, option_of, _seen: frozenset[int] = frozenset()) -> bool:
+    def is_visible(self, data_id: int, link_id: int, option_of) -> bool:
         """Should PCLink's data show this for an ECU model, given current options?
 
         `option_of(id)` returns a parameter's option index, or None if it is absent.
         """
-        if not self.known(data_id) or data_id in _seen:
+        if not self.known(data_id):
             return False
         parameter = self.parameter(data_id)
         if not parameter.visible or link_id in parameter.hidden_on_ecus:
@@ -199,16 +199,10 @@ class Database:
         parents = self.controllers().get(data_id)
         if not parents:
             return True
-        seen = _seen | {data_id}
         for parent_id in parents:
             option = option_of(parent_id)
             children = self.parameter(parent_id).children_by_option
-            if (
-                option is not None
-                and 0 <= option < len(children)
-                and data_id in children[option]
-                and self.is_visible(parent_id, link_id, option_of, seen)
-            ):
+            if option is not None and 0 <= option < len(children) and data_id in children[option]:
                 return True
         return False
 

@@ -53,11 +53,11 @@ def _encrypt_words(v: list[int], key: tuple[int, ...]) -> None:
         z = v[n - 1] = (v[n - 1] + _mx(y, z, total, key, n - 1, e)) & _MASK
 
 
-def decode(data: bytes, key: tuple[int, ...]) -> bytes:
+def decode(data: bytes, key: tuple[int, ...], serial: int | None = None) -> bytes:
     """Return the payload of a container.
 
-    Files with a non-zero tag are tuner-protected. PCLink only opens those for
-    the tuner who holds the key, so they are refused rather than decoded.
+    A non-zero tag locks a file to one ECU's serial number. As in PCLink it opens
+    only for that ECU, so it is refused without a matching connected serial.
     """
     n = len(data) // 4
     if n < 4:
@@ -68,17 +68,34 @@ def decode(data: bytes, key: tuple[int, ...]) -> bytes:
     _, size, tag = struct.unpack_from("<3I", plain)
     if not 0 < size <= len(plain) - HEADER_SIZE or len(plain) - HEADER_SIZE - size >= 32:
         raise BadContainer("size field is invalid; wrong key or not a container")
-    if tag != 0:
-        raise ProtectedFile("this file was protected by its tuner and cannot be opened")
+    if tag != 0 and tag != serial:
+        raise ProtectedFile("this file is locked to a different ECU's serial number and cannot be opened")
     return plain[HEADER_SIZE : HEADER_SIZE + size]
 
 
-def encode(payload: bytes, key: tuple[int, ...]) -> bytes:
-    """Build a container with no protection tag."""
+def encode(payload: bytes, key: tuple[int, ...], tag: int = 0) -> bytes:
+    """Build a container, locked to an ECU serial number if a tag is given."""
     n = (len(payload) // 4) + 4
     plain = bytearray(n * 4)
-    struct.pack_into("<3I", plain, 0, int(time.time()), len(payload), 0)
+    struct.pack_into("<3I", plain, 0, int(time.time()), len(payload), tag)
     plain[HEADER_SIZE : HEADER_SIZE + len(payload)] = payload
     words = list(struct.unpack(f"<{n}I", bytes(plain)))
     _encrypt_words(words, key)
     return struct.pack(f"<{n}I", *words)
+
+
+def rc4(data: bytes, key: bytes) -> bytes:
+    """PCLink's CAN stream files use plain RC4."""
+    box = list(range(256))
+    j = 0
+    for i in range(256):
+        j = (j + box[i] + key[i % len(key)]) & 0xFF
+        box[i], box[j] = box[j], box[i]
+    out = bytearray(len(data))
+    i = j = 0
+    for at, byte in enumerate(data):
+        i = (i + 1) & 0xFF
+        j = (j + box[i]) & 0xFF
+        box[i], box[j] = box[j], box[i]
+        out[at] = byte ^ box[(box[i] + box[j]) & 0xFF]
+    return bytes(out)

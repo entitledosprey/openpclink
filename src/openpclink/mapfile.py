@@ -44,8 +44,8 @@ class MapFile:
     entries: dict[int, MapEntry]
 
     @classmethod
-    def load(cls, path: Path, key: tuple[int, ...]) -> "MapFile":
-        return cls.parse(crypto.decode(Path(path).read_bytes(), key))
+    def load(cls, path: Path, key: tuple[int, ...], serial: int | None = None) -> "MapFile":
+        return cls.parse(crypto.decode(Path(path).read_bytes(), key, serial))
 
     @classmethod
     def parse(cls, xml_data: bytes) -> "MapFile":
@@ -76,8 +76,11 @@ class MapFile:
         return cls(memory, entries)
 
     @classmethod
-    def from_ecu(cls, ecu: Ecu, database: Database) -> "MapFile":
-        """Capture an ECU's current tune. This only reads what is already loaded."""
+    def from_ecu(cls, ecu: Ecu, database: Database, keep_lock: bool = False) -> "MapFile":
+        """Capture an ECU's current tune. This only reads what is already loaded.
+
+        `keep_lock` carries its password across, for a file locked to an ECU.
+        """
         if ecu.is_protected:
             raise EcuProtected("a password-protected ECU cannot be saved to a map file")
         info = ecu.info
@@ -100,7 +103,9 @@ class MapFile:
             if data_id == 0:
                 continue
             runtime = loc.offset < info.runtime_size
-            if data_id in (MASTER_PASSWORD_ID, USER_PASSWORD_ID):
+            if data_id == MASTER_PASSWORD_ID and keep_lock:
+                values, text = [ecu._read_raw_number(loc, i) for i in range(loc.count)], ""
+            elif data_id in (MASTER_PASSWORD_ID, USER_PASSWORD_ID):
                 values, text = [0.0] * loc.count, ""
             elif data_id in SECRET_IDS:
                 values, text = [0.0], ""
@@ -151,8 +156,8 @@ class MapFile:
         lines += ["\t</Map>", "</LinkStorage>", ""]
         return "\n".join(lines).encode("utf-8")
 
-    def save(self, path: Path, key: tuple[int, ...]) -> None:
-        Path(path).write_bytes(crypto.encode(self.to_xml(), key))
+    def save(self, path: Path, key: tuple[int, ...], locked_to: int = 0) -> None:
+        Path(path).write_bytes(crypto.encode(self.to_xml(), key, locked_to))
 
 
 def _escape(text: str) -> str:
@@ -216,6 +221,9 @@ class OfflineEcu:
     @property
     def has_unstored_changes(self) -> bool:
         return self._dirty
+
+    def is_changed(self, data_id: int, index: int = 0) -> bool:
+        return False
 
     def location(self, data_id: int) -> Location:
         return self.table[data_id]

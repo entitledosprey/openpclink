@@ -22,6 +22,8 @@ from . import crypto
 # PCLink keeps this string directly before its three file keys.
 _KEY_MARKER = b"gfkkdfgdbiub3492jsdohdfs"
 _KEYS_OFFSET = 0x24
+# The eight bytes that hide firmware images from casual reading, needed to check their checksums.
+_FIRMWARE_KEY_OFFSET = 0x4FA244
 
 
 class ImportFailed(Exception):
@@ -50,6 +52,10 @@ def find_keys(exe: bytes) -> list[tuple[int, ...]]:
         raise ImportFailed("this PCLink.exe has an unrecognised format")
     start = at + _KEYS_OFFSET
     return [struct.unpack_from("<4I", exe, start + i * 16) for i in range(3)]
+
+
+def find_firmware_key(exe: bytes) -> bytes:
+    return exe[_FIRMWARE_KEY_OFFSET : _FIRMWARE_KEY_OFFSET + 8]
 
 
 def _decode_with_any(data: bytes, keys: list[tuple[int, ...]]) -> tuple[bytes, tuple[int, ...]]:
@@ -107,7 +113,8 @@ def import_pclink(source: Path, destination: Path | None = None) -> Path:
     destination = destination or default_db_path()
     folder, temp = _locate(source)
     try:
-        keys = find_keys((folder / "PCLink.exe").read_bytes())
+        exe = (folder / "PCLink.exe").read_bytes()
+        keys = find_keys(exe)
         ecu_xml, map_key = _decode_with_any((folder / "ECU.cfgr").read_bytes(), keys)
         strings_raw, _ = _decode_with_any((folder / "Languages.cfgr").read_bytes(), keys)
         database = {
@@ -115,9 +122,15 @@ def import_pclink(source: Path, destination: Path | None = None) -> Path:
             "parameters": _parse_parameters(ecu_xml),
             "strings": _parse_strings(strings_raw.decode("utf-16")),
             "map_key": list(map_key),
+            "stream_key": _KEY_MARKER.decode("ascii"),
+            "file_key": list(keys[2]),
+            "firmware_key": find_firmware_key(exe).hex(),
         }
         destination.parent.mkdir(parents=True, exist_ok=True)
         _extract_help(folder, destination.with_name("pclink-help.json.gz"))
+        from .assets import copy_assets
+
+        copy_assets(folder, destination.with_name("pclink-assets"))
     finally:
         if temp:
             shutil.rmtree(temp, ignore_errors=True)
@@ -140,7 +153,7 @@ def bundled_help_path() -> Path | None:
 
 
 def _extract_help(folder: Path, destination: Path) -> bool:
-    """Convert the CHM manual's pages to a small searchable file (text only, no images)."""
+    """Convert the CHM manual's pages to a small searchable file, with its pictures beside it."""
     chm = folder / "Help_File_ENG.chm"
     tool = shutil.which("7z") or shutil.which("7zz") or shutil.which("7za")
     if tool is None or not chm.exists():
@@ -149,6 +162,11 @@ def _extract_help(folder: Path, destination: Path) -> bool:
         done = subprocess.run([tool, "x", "-y", f"-o{temp}", str(chm)], capture_output=True)
         if done.returncode != 0:
             return False
+        images = destination.with_name("pclink-help-images")
+        images.mkdir(parents=True, exist_ok=True)
+        for picture in Path(temp).rglob("*"):
+            if picture.suffix.lower() in (".png", ".jpg", ".jpeg", ".gif"):
+                shutil.copy2(picture, images / picture.name)
         pages = {}
         for page in Path(temp).rglob("*.htm*"):
             html = page.read_bytes().decode("utf-8", "replace")
@@ -162,7 +180,7 @@ def _extract_help(folder: Path, destination: Path) -> bool:
 
 def _clean_help_page(html: str) -> str:
     html = re.sub(r"(?is)<(script|style|head)\b.*?</\1>", "", html)
-    html = re.sub(r"(?is)<img\b[^>]*>", "", html)
+    html = re.sub(r'(?i)(<img\b[^>]*\bsrc=")(?:[^"]*/)?([^"/]+")', r"\1\2", html)
     html = re.sub(r'(?is)<div id="header".*?</div>\s*</div>', "", html, count=1)
     return html.strip()
 

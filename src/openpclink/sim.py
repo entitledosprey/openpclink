@@ -41,6 +41,15 @@ def _width_for(raws: list[int], signed: bool) -> int:
     return 4
 
 
+class SimRefusal(Exception):
+    def __init__(self, code: int) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+ERROR_ENGINE_RUNNING = 4
+
+
 class SimEcu:
     """Holds memory and answers request frames."""
 
@@ -53,6 +62,29 @@ class SimEcu:
         self.map_calibrations = 0
         self.engine_running = True
         self.log: list[int] = []
+        self.frames: list[tuple[int, int, bytes]] = []
+        self.addr = p.ADDR_MAIN
+        self.bulk_mode = 0
+        self.baro_calibrations: list[int] = []
+        self.feature_codes: list[bytes] = []
+        self.ecu_logs: list[tuple[str, bytes]] = []
+        self.log_cursor = 0
+        self.log_tick_rate = 1000
+        self.log_magic = 0xA5A55A5A
+        self.log_max_channels = 32
+        self.logging_paused = False
+        self.memo = ""
+        self.memo_buffer = bytearray()
+        self.can_file = b""
+        self.can_buffer = bytearray()
+        self.can_transmitted: list[bytes] = []
+        self.can_replies: list[bytes] = []
+        self.scope_rate = 0
+        self.scope_stopped = 0
+        self.firmware_stage: list[str] = []
+        self.firmware_body = bytearray()
+        self.firmware_header = b""
+        self.comms_values: dict[int, dict] = {}
         self.writes: list[bytes] = []
         self.state = 1
         self._build(map_xml)
@@ -197,12 +229,21 @@ class SimEcu:
         addr, cmd, length = frame[1], *struct.unpack(">HH", frame[2:6])
         payload = frame[6 : 6 + length - 2]
         self.log.append(cmd)
+        self.frames.append((addr, cmd, bytes(payload)))
+        self.addr = addr
         try:
             return p.build_reply(addr, cmd, self._dispatch(cmd, payload))
+        except SimRefusal as refusal:
+            return p.build_reply(addr, p.CMD_ERROR, struct.pack(">H", refusal.code))
         except KeyError:
             return p.build_reply(addr, p.CMD_ERROR, struct.pack(">H", p.ERR_UNSUPPORTED))
 
     def _dispatch(self, cmd: int, payload: bytes) -> bytes:
+        if self.addr == p.ADDR_COMMS:
+            return self._dispatch_comms(cmd, payload)
+        extra = self._dispatch_tools(cmd, payload)
+        if extra is not None:
+            return extra
         rt, cfg = self.runtime_size, self.config_size
         if cmd == p.CMD_STATE:
             return struct.pack(">H", self.state)
@@ -244,11 +285,192 @@ class SimEcu:
             self.map_calibrations += 1
             return struct.pack(">H", 1)
         if cmd == CMD_FACTORY_RESET:
+            if self.engine_running:
+                raise SimRefusal(ERROR_ENGINE_RUNNING)
             self.factory_resets += 1
             self.memory[rt : rt + cfg] = bytes(cfg)
             self.flash = bytes(self.memory)
             return struct.pack(">H", 1)
         raise KeyError(cmd)
+
+    def _dispatch_tools(self, cmd: int, payload: bytes) -> bytes | None:
+        ok = struct.pack(">H", 1)
+        if cmd == p.CMD_LOG_INFO:
+            body = bytearray(0x17)
+            struct.pack_into(">IH", body, 0, self.log_tick_rate, len(self.ecu_logs))
+            struct.pack_into(">IH", body, 0x0D, self.log_magic, self.log_max_channels)
+            self.log_cursor = 0
+            return bytes(body)
+        if cmd == p.CMD_FILE:
+            return self._file(payload)
+        if cmd == p.CMD_WRITE_MEMO:
+            return self._blob(payload, self.memo_buffer, "memo")
+        if cmd == p.CMD_WRITE_CAN_FILE:
+            return self._blob(payload, self.can_buffer, "can")
+        if cmd == p.CMD_BULK_DOWNLOAD:
+            if self.engine_running:
+                raise SimRefusal(ERROR_ENGINE_RUNNING)
+            self.bulk_mode = payload[0]
+            return ok
+        if cmd == p.CMD_CALIBRATE_BARO:
+            self.baro_calibrations.append(struct.unpack(">I", payload)[0])
+            return ok
+        if cmd == p.CMD_FEATURE_UNLOCK:
+            self.feature_codes.append(bytes(payload))
+            return ok
+        if cmd == p.CMD_EXCEPTION_DUMP:
+            return b"trap"
+        if cmd == p.CMD_TRIGGER_SCOPE:
+            return self._scope(payload)
+        if cmd == p.CMD_CAN_CONTROL:
+            return ok
+        if cmd == p.CMD_CAN_RECEIVE:
+            frames, self.can_replies = b"".join(self.can_replies), []
+            return frames
+        if cmd == p.CMD_CAN_TRANSMIT:
+            self.can_transmitted.append(bytes(payload))
+            return ok
+        if cmd == p.CMD_SET_CLOCK:
+            return ok
+        if cmd in (p.CMD_FW_RESET, p.CMD_FW_REQUEST_BOOT, p.CMD_FW_START, p.CMD_FW_HEADER, p.CMD_FW_DATA, p.CMD_FW_REQUEST_MAIN):
+            return self._firmware_step(cmd, payload)
+        return None
+
+    def _firmware_step(self, cmd: int, payload: bytes) -> bytes:
+        ok = struct.pack(">H", 1)
+        if cmd == p.CMD_FW_RESET:
+            self.firmware_stage.append("reset")
+        elif cmd == p.CMD_FW_REQUEST_BOOT:
+            if self.engine_running:
+                raise SimRefusal(ERROR_ENGINE_RUNNING)
+            self.state = 3
+            self.firmware_stage.append("boot")
+        elif self.state != 3:
+            raise SimRefusal(3)
+        elif cmd == p.CMD_FW_START:
+            self.firmware_stage.append("start")
+            self.firmware_body = bytearray()
+        elif cmd == p.CMD_FW_HEADER:
+            self.firmware_stage.append("header")
+            self.firmware_header = bytes(payload)
+        elif cmd == p.CMD_FW_DATA:
+            address, words = struct.unpack_from(">II", payload)
+            expected = struct.unpack_from(">I", self.firmware_header, 20)[0] + len(self.firmware_body)
+            if address != expected or words * 4 != len(payload) - 8:
+                raise SimRefusal(0x27)
+            self.firmware_body += payload[8:]
+        elif cmd == p.CMD_FW_REQUEST_MAIN:
+            self.firmware_stage.append("main")
+            self.state = 1
+        return ok
+
+    def _scope(self, payload: bytes) -> bytes:
+        sub, a, b = struct.unpack(">HHH", payload)
+        if sub == 0x0A:
+            self.scope_rate = b
+            return struct.pack(">H", 1)
+        if sub == 6:
+            self.scope_stopped += 1
+            return struct.pack(">H", 1)
+        return bytes((sub * 7 + i) & 0x7F for i in range(a))
+
+    def _blob(self, payload: bytes, buffer: bytearray, target: str) -> bytes:
+        offset = struct.unpack_from(">H", payload)[0]
+        data = payload[2:]
+        if offset == 1 and not data:
+            if target == "memo":
+                self.memo = bytes(buffer).decode("utf-16-le")
+            else:
+                self.can_file = bytes(buffer)
+            buffer.clear()
+        else:
+            buffer[offset:offset + len(data)] = data
+        return struct.pack(">H", 1)
+
+    def _file(self, payload: bytes) -> bytes:
+        operation = struct.unpack_from(">I", payload)[0]
+        if operation == p.FILE_PAUSE_LOGGING:
+            self.logging_paused = True
+            return struct.pack(">H", 1)
+        if operation == p.FILE_RESUME_LOGGING:
+            self.logging_paused = False
+            return struct.pack(">H", 1)
+        if operation == p.FILE_NEXT:
+            name, data = self.ecu_logs[self.log_cursor]
+            self.log_cursor += 1
+            return struct.pack(">BxxxI", 0, len(data)) + name.encode("latin-1") + b"\0"
+        offset = struct.unpack_from(">I", payload, 6)[0]
+        name = payload[14:].split(b"\0", 1)[0].decode("latin-1")
+        if operation == p.FILE_DELETE:
+            self.ecu_logs = [entry for entry in self.ecu_logs if entry[0] != name]
+            return struct.pack(">H", 1)
+        if not name:
+            return struct.pack(">H", 1)
+        if name == "Memo":
+            data = self.memo.encode("utf-16-le")
+            return data[offset:] + (b"\0\0" if offset < len(data) or (not offset and data) else b"") if offset < len(data) else b""
+        if name == "CANFile":
+            return self.can_file[offset : offset + 512]
+        data = dict(self.ecu_logs).get(name)
+        if data is None:
+            raise KeyError(name)
+        return data[offset : offset + 512]
+
+    def _dispatch_comms(self, cmd: int, payload: bytes) -> bytes:
+        """The G5 comms processor: settings from id 10000, plain floats and text."""
+        ok = struct.pack(">H", 1)
+        if cmd in (p.CMD_BOOT_INFO, p.CMD_FIRMWARE_INFO):
+            return self._info(cmd)
+        if cmd == p.CMD_MEMORY_INFO:
+            body = bytearray(0x14)
+            struct.pack_into(">H", body, 0x12, 10000 + max((i - 10000 + 1 for i in self.comms_values), default=0))
+            return bytes(body)
+        if cmd == p.CMD_COMMS_READ_RECORD:
+            data_id = struct.unpack_from(">H", payload)[0]
+            item = self.comms_values.get(data_id)
+            if item is None:
+                raise SimRefusal(2)
+            body = bytearray(0x16)
+            body[3] = item["kind"]
+            struct.pack_into(">H", body, 4, item.get("count", 1))
+            struct.pack_into(">ff", body, 0xA, item.get("min", 0.0), item.get("max", 0.0))
+            return bytes(body) + self._comms_value(item)
+        if cmd == p.CMD_COMMS_READ:
+            data_id = struct.unpack_from(">H", payload)[0]
+            item = self.comms_values[data_id]
+            return struct.pack(">HHHhH", 0, item["kind"], data_id, -1, item.get("count", 1)) + self._comms_value(item)
+        if cmd == p.CMD_COMMS_WRITE:
+            data_id, where = struct.unpack_from(">HH", payload)
+            item = self.comms_values[data_id]
+            raw = payload[4:]
+            if item["kind"] in (4, 7):
+                item["text"] = raw.decode("utf-16-be").split("\0", 1)[0]
+            else:
+                code = ">f" if item["kind"] in (1, 5) else ">i" if item["kind"] == 3 else ">I"
+                value = struct.unpack_from(code, raw)[0]
+                if where == 0xFFFF:
+                    item["value"] = value
+                else:
+                    item["values"][where] = value
+            return struct.pack(">HHHhH", 0, item["kind"], data_id, -1, item.get("count", 1)) + self._comms_value(item)
+        if cmd in (p.CMD_STORE, p.CMD_SET_CLOCK):
+            return ok
+        if cmd == CMD_FACTORY_RESET:
+            self.factory_resets += 1
+            return ok
+        if cmd in (p.CMD_FW_RESET, p.CMD_FW_REQUEST_BOOT, p.CMD_FW_START, p.CMD_FW_HEADER, p.CMD_FW_DATA, p.CMD_FW_REQUEST_MAIN):
+            return self._firmware_step(cmd, payload)
+        if cmd == p.CMD_STATE:
+            return struct.pack(">H", self.state)
+        raise KeyError(cmd)
+
+    @staticmethod
+    def _comms_value(item: dict) -> bytes:
+        if item["kind"] in (4, 7):
+            return item.get("text", "").ljust(item.get("count", 1), "\0").encode("utf-16-be")
+        code = ">f" if item["kind"] in (1, 5) else ">i" if item["kind"] == 3 else ">I"
+        values = item.get("values", [item.get("value", 0)])
+        return b"".join(struct.pack(code, value) for value in values)
 
     def _info(self, cmd: int) -> bytes:
         major, minor, patch = self.firmware

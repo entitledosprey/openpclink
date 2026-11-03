@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 
+from . import assets
 from .importer import bundled_db_path, bundled_help_path, default_db_path, default_help_path
 
 _MAX_INHERIT_DEPTH = 32
@@ -84,6 +85,8 @@ class Parameter:
     column_source_id: int | None = None
     row_source_id: int | None = None
     kind: int | None = None
+    value_type: str = ""
+    keywords: str = ""
 
     @property
     def is_table(self) -> bool:
@@ -99,6 +102,9 @@ class Database:
         self._params: dict[int, dict] = {int(k): v for k, v in raw["parameters"].items()}
         self._strings: dict[int, str] = {int(k): v for k, v in raw["strings"].items()}
         self.map_key: tuple[int, ...] = tuple(raw["map_key"])
+        self.stream_key: bytes = raw.get("stream_key", "").encode("ascii")
+        self.file_key: tuple[int, ...] = tuple(raw.get("file_key", ()))
+        self.firmware_key: bytes = bytes.fromhex(raw.get("firmware_key", ""))
         self._cache: dict[int, Parameter] = {}
         self._controllers: dict[int, list[int]] | None = None
 
@@ -107,12 +113,17 @@ class Database:
         candidates = [path] if path else [default_db_path(), bundled_db_path()]
         for candidate in candidates:
             if candidate and candidate.exists():
+                if path:
+                    assets.use_root(Path(path).with_name("pclink-assets"))
                 with gzip.open(candidate, "rt", encoding="utf-8") as stream:
                     return cls(json.load(stream))
         raise DatabaseMissing(
             "No PCLink data found. Import it from your own PCLink installer: "
             "openpclink import /path/to/PCLink-EN-x.y.z.exe"
         )
+
+    def translate(self, ref: str | None) -> str:
+        return self._string(ref)
 
     def _string(self, ref: str | None) -> str:
         if ref and ref.strip().isdigit():
@@ -175,6 +186,8 @@ class Database:
             column_source_id=_int(prop("XAxisParameterID")),
             row_source_id=_int(prop("YAxisParameterID")),
             kind=_int(prop("Type")),
+            value_type=prop("ValueType") or "",
+            keywords=self._string(prop("KeyWords")) if prop("KeyWords") else "",
         )
         self._cache[data_id] = parameter
         return parameter
@@ -258,6 +271,11 @@ class HelpManual:
                 with gzip.open(path, "rt", encoding="utf-8") as stream:
                     self.pages = json.load(stream)
                 return
+
+    @staticmethod
+    def image_folders() -> list[str]:
+        folders = [path.with_name("pclink-help-images") for path in (default_help_path(), bundled_help_path()) if path]
+        return [str(folder) for folder in folders if folder.exists()]
 
     def page_for(self, help_url: str) -> str | None:
         return self.pages.get(help_url.partition("#")[0].lower())

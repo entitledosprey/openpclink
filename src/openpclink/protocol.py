@@ -18,44 +18,93 @@ from .transports import Transport
 
 ADDR_MAIN = 0x5B
 
+ADDR_COMMS = 0x7D
+
 CMD_READ_CONFIG = 0x00
 CMD_READ_DESCRIPTOR_LEGACY = 0x01
 CMD_WRITE_CONFIG = 0x02
 CMD_STATE = 0x03
+CMD_COMMS_READ_RECORD = 0x04
+CMD_COMMS_POLL_A = 0x07
 CMD_WRITE_SECTION2 = 0x08
 CMD_POLL_RUNTIME = 0x09
+CMD_COMMS_POLL_B = 0x0A
 CMD_MEMORY_INFO = 0x0B
 CMD_READ_DESCRIPTOR = 0x0D
+CMD_FW_START = 0x10
+CMD_FW_REQUEST_BOOT = 0x11
+CMD_FW_REQUEST_MAIN = 0x12
+CMD_FW_DATA = 0x14
+CMD_FW_HEADER = 0x15
 CMD_FIRMWARE_INFO = 0x16
 CMD_BOOT_INFO = 0x18
 CMD_ERROR = 0x19
 CMD_IDENTITY = 0x1A
+CMD_LOG_INFO = 0x1B
+CMD_CALIBRATE_BARO = 0x1E
 CMD_CALIBRATE_MAP = 0x1F
 CMD_STORE = 0x20
+CMD_FACTORY_RESET = 0x21
+CMD_FW_RESET = 0x22
+CMD_BULK_DOWNLOAD = 0x23
+CMD_FEATURE_UNLOCK = 0x24
+CMD_TRIGGER_SCOPE = 0x26
+CMD_EXCEPTION_DUMP = 0x27
+CMD_COMMS_WRITE = 0x2A
+CMD_COMMS_READ = 0x2B
+CMD_FILE = 0x2E
 CMD_CLEAR_STATISTICS = 0x2F
 CMD_READ_SECTION2 = 0x32
+CMD_CAN_RECEIVE = 0x33
+CMD_CAN_TRANSMIT = 0x34
+CMD_CAN_CONTROL = 0x35
+CMD_WRITE_MEMO = 0x36
+CMD_WRITE_CAN_FILE = 0x38
+CMD_SET_CLOCK = 0x39
 
-# Only these commands can be sent. The firmware updater's commands (0x10, 0x11,
-# 0x12, 0x14, 0x15, 0x22), the factory reset (0x21, right next to Store) and
-# anything unidentified can brick or wipe an ECU, so they are deliberately absent.
+# Only these commands can be sent through request(). The firmware updater's commands
+# and the factory reset (0x21, right next to Store) can brick or wipe an ECU, so they
+# are absent; they go through request_dangerous(), which only the updater and the
+# factory reset call. Anything unidentified cannot be sent at all.
 ALLOWED_COMMANDS = frozenset(
     {
         CMD_READ_CONFIG,
         CMD_READ_DESCRIPTOR_LEGACY,
         CMD_WRITE_CONFIG,
         CMD_STATE,
+        CMD_COMMS_READ_RECORD,
+        CMD_COMMS_POLL_A,
         CMD_WRITE_SECTION2,
         CMD_POLL_RUNTIME,
+        CMD_COMMS_POLL_B,
         CMD_MEMORY_INFO,
         CMD_READ_DESCRIPTOR,
         CMD_FIRMWARE_INFO,
         CMD_BOOT_INFO,
         CMD_IDENTITY,
+        CMD_LOG_INFO,
+        CMD_CALIBRATE_BARO,
         CMD_CALIBRATE_MAP,
         CMD_STORE,
+        CMD_BULK_DOWNLOAD,
+        CMD_FEATURE_UNLOCK,
+        CMD_TRIGGER_SCOPE,
+        CMD_EXCEPTION_DUMP,
+        CMD_COMMS_WRITE,
+        CMD_COMMS_READ,
+        CMD_FILE,
         CMD_CLEAR_STATISTICS,
         CMD_READ_SECTION2,
+        CMD_CAN_RECEIVE,
+        CMD_CAN_TRANSMIT,
+        CMD_CAN_CONTROL,
+        CMD_WRITE_MEMO,
+        CMD_WRITE_CAN_FILE,
+        CMD_SET_CLOCK,
     }
+)
+DANGEROUS_COMMANDS = frozenset(
+    {CMD_FW_START, CMD_FW_REQUEST_BOOT, CMD_FW_REQUEST_MAIN, CMD_FW_DATA, CMD_FW_HEADER, CMD_FACTORY_RESET, CMD_FW_RESET}
 )
 
 # Safe to repeat after a lost or damaged reply. Writes and Store are not here:
@@ -65,16 +114,25 @@ RETRYABLE_COMMANDS = frozenset(
         CMD_READ_CONFIG,
         CMD_READ_DESCRIPTOR_LEGACY,
         CMD_STATE,
+        CMD_COMMS_READ_RECORD,
         CMD_POLL_RUNTIME,
         CMD_MEMORY_INFO,
         CMD_READ_DESCRIPTOR,
         CMD_FIRMWARE_INFO,
         CMD_BOOT_INFO,
         CMD_IDENTITY,
+        CMD_LOG_INFO,
+        CMD_EXCEPTION_DUMP,
+        CMD_COMMS_READ,
         CMD_READ_SECTION2,
     }
 )
 READ_ATTEMPTS = 3
+
+# Sub-operations of CMD_FILE.
+FILE_READ, FILE_DELETE, FILE_NEXT, FILE_STREAM, FILE_PAUSE_LOGGING, FILE_RESUME_LOGGING = 0, 1, 2, 3, 4, 5
+_READ_ONLY_FILE_OPERATIONS = (FILE_READ, FILE_NEXT)
+_FEATURE_LOCK_WORDS = bytes.fromhex("0EF1DEAD0EF1DEAD")
 
 # Exactly what real PCLink sends. 0x1F has another form with no payload whose purpose is unknown.
 CALIBRATE_MAP_PAYLOAD = bytes([0x00, CMD_CALIBRATE_MAP]) + bytes(8)
@@ -134,11 +192,39 @@ class Link:
     addr: int = ADDR_MAIN
     max_packet: int = 0x38
 
-    def request(self, cmd: int, payload: bytes = b"", timeout: float = DEFAULT_TIMEOUT) -> bytes:
-        if cmd not in ALLOWED_COMMANDS or (cmd == CMD_CALIBRATE_MAP and payload != CALIBRATE_MAP_PAYLOAD):
-            raise ForbiddenCommand(f"command 0x{cmd:02X} is not allowed")
-        if os.environ.get(READ_ONLY_ENV) and cmd not in RETRYABLE_COMMANDS:
+    def _refused(self, cmd: int, payload: bytes) -> str | None:
+        if cmd == CMD_CALIBRATE_MAP and payload != CALIBRATE_MAP_PAYLOAD:
+            return f"command 0x{cmd:02X} is not allowed"
+        if cmd == CMD_FEATURE_UNLOCK and payload == _FEATURE_LOCK_WORDS:
+            return "the code that disables an ECU's features is not allowed"
+        if os.environ.get(READ_ONLY_ENV):
+            is_read = cmd == CMD_FILE and len(payload) >= 4 and struct.unpack_from(">I", payload)[0] in _READ_ONLY_FILE_OPERATIONS
+            if cmd not in RETRYABLE_COMMANDS and not is_read:
+                return f"read-only mode: command 0x{cmd:02X} was not sent"
+        return None
+
+    def request_dangerous(self, cmd: int, payload: bytes = b"", timeout: float = DEFAULT_TIMEOUT, expect_reply: bool = True) -> bytes:
+        """A firmware or factory reset command. Only firmware.py and Ecu.restore_factory call this."""
+        if cmd not in DANGEROUS_COMMANDS:
+            raise ForbiddenCommand(f"command 0x{cmd:02X} is not a firmware command")
+        if os.environ.get(READ_ONLY_ENV):
             raise ForbiddenCommand(f"read-only mode: command 0x{cmd:02X} was not sent")
+        if expect_reply:
+            return self._exchange(cmd, payload, timeout)
+        self.send_only(cmd, payload)
+        return b""
+
+    def send_only(self, cmd: int, payload: bytes = b"") -> None:
+        self.transport.purge()
+        request = build_request(self.addr, cmd, payload)
+        if self.transport.write(request) != len(request):
+            raise ProtocolError(f"short write sending command 0x{cmd:02X}")
+
+    def request(self, cmd: int, payload: bytes = b"", timeout: float = DEFAULT_TIMEOUT) -> bytes:
+        refused = "" if cmd in ALLOWED_COMMANDS else f"command 0x{cmd:02X} is not allowed"
+        refused = refused or self._refused(cmd, payload)
+        if refused:
+            raise ForbiddenCommand(refused)
         attempts = READ_ATTEMPTS if cmd in RETRYABLE_COMMANDS else 1
         for attempt in range(1, attempts + 1):
             try:

@@ -12,9 +12,11 @@ from PySide6 import QtCore, QtWidgets  # noqa: E402
 
 from openpclink import crypto  # noqa: E402
 from openpclink.database import Database  # noqa: E402
+from openpclink.gauges import Gauge, fraction_of  # noqa: E402
 from openpclink.gui import MainWindow  # noqa: E402
 from openpclink.importer import import_pclink  # noqa: E402
 from openpclink.sim import PtyServer, SimEcu  # noqa: E402
+from openpclink.workspace import LiveView  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -31,11 +33,14 @@ def database(tmp_path_factory):
     return Database.load(import_pclink(PROGRAM, tmp_path_factory.mktemp("db") / "db.json.gz"))
 
 
+os.environ.setdefault("OPENPCLINK_OPTIONS", "/nonexistent-openpclink-test/options.json")
+
 _kept_windows = []
 
 
 def dispose(app, window):
     """Tear down in a fixed order; Python's garbage collector must not pick the moment."""
+    window.log_session.logs.clear()
     window.close()
     window.deleteLater()
     _kept_windows.append(window)
@@ -103,7 +108,11 @@ def test_connects_and_builds_full_menu(session):
 
 def test_live_values_update(session):
     app, window, _ = session
-    assert pump(app, lambda: any(window.gauges.item(r, 1).text() for r in range(window.gauges.rowCount())))
+    assert window.reading(1000) is not None
+    page = window.workspace.current()
+    lists = page.bodies(LiveView)
+    assert lists
+    assert pump(app, lambda: any(view.body.readings for view in lists))
 
 
 def test_change_enum_through_ui_reaches_ecu_and_stores(session):
@@ -281,25 +290,20 @@ def test_pc_logging_records_while_connected(session, tmp_path):
 
 def test_gauges_follow_live_values_and_never_write(session):
     app, window, sim = session
-    data_id = window.gauge_ids[0]
-    gauge = window.gauge_panel.gauges[data_id]
-    assert pump(app, lambda: gauge.value is not None)
-    window.right_tabs.setCurrentWidget(window.gauge_panel)
-    window.gauge_panel.grab()
+    window.workspace.show_page("Tuning")
+    page = window.workspace.current()
+    gauges = [view for view in page.bodies(LiveView) if isinstance(view.body, Gauge)]
+    assert gauges
+    assert pump(app, lambda: any(view.body.readings for view in gauges))
+    for view in gauges:
+        view.body.grab()
     assert sim.writes == []
 
 
-def test_gauge_needle_pins_at_the_ends_of_its_range():
-    from openpclink.views import DialGauge
-
-    gauge = DialGauge("RPM", "RPM", 0, 8000)
-    gauge.set_value(4000, "4000")
-    assert gauge.needle_fraction() == 0.5
-    gauge.set_value(65535, "65535")
-    assert gauge.needle_fraction() == 1.0
-    gauge.set_value(-5, "-5")
-    assert gauge.needle_fraction() == 0.0
-
+def test_gauge_position_pins_at_the_ends_of_its_range():
+    assert fraction_of(4000, 0, 8000) == 0.5
+    assert fraction_of(65535, 0, 8000) == 1.0
+    assert fraction_of(-5, 0, 8000) == 0.0
 
 def _captions(window):
     return [window.database.parameter(i).caption for i in window.form.editors]
@@ -355,21 +359,22 @@ def test_status_window_shows_the_active_fault_and_sends_nothing(session):
     status.close()
 
 
-def test_log_viewer_draws_every_plot_with_real_data_and_edge_cases(app):
+def test_log_views_draw_with_real_data_and_edge_cases(app):
     from openpclink.logfile import Log
-    from openpclink.views import LogViewer
+    from openpclink.logviews import LOG_VIEW_TYPES, LogSession, VehiclePlan
 
     for log in (
         Log(["RPM", "MAP"], [0.0, 0.1, 0.2], [[800.0, 900.0, 1000.0], [40.0, 40.0, 40.0]]),
         Log(["RPM"], [0.0], [[800.0]]),
         Log(["RPM"], [], [[]]),
     ):
-        viewer = LogViewer(log, "test")
-        viewer.show()
-        viewer.xy.grab()
-        viewer.histogram.grab()
-        viewer.plot.grab()
-        viewer.close()
+        session = LogSession()
+        views = [kind(session) for kind in LOG_VIEW_TYPES.values()] + [VehiclePlan(session)]
+        session.add(log)
+        session.set_cursor(0.1)
+        for view in views:
+            view.resize(400, 300)
+            view.grab()
 
 
 def test_clear_faults_writes_the_flag_without_marking_the_tune_changed(session):

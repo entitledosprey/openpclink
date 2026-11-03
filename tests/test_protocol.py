@@ -34,7 +34,7 @@ def test_request_frame_layout():
     assert p.crc16(frame) == 0
 
 
-@pytest.mark.parametrize("cmd", [0x10, 0x11, 0x12, 0x14, 0x15, 0x21, 0x22, 0x1E, 0x1F, 0x2E, 0x7F])
+@pytest.mark.parametrize("cmd", [0x10, 0x11, 0x12, 0x14, 0x15, 0x21, 0x22, 0x1F, 0x7F])
 def test_firmware_and_unknown_commands_cannot_be_sent(cmd):
     transport = Scripted()
     with pytest.raises(p.ForbiddenCommand):
@@ -142,7 +142,7 @@ def test_read_only_mode_never_sends_writes_or_store(monkeypatch, cmd):
 
 
 def test_read_only_mode_allows_only_commands_that_cannot_change_the_ecu(monkeypatch):
-    assert p.RETRYABLE_COMMANDS == {0x00, 0x01, 0x03, 0x09, 0x0B, 0x0D, 0x16, 0x18, 0x1A, 0x32}
+    assert p.RETRYABLE_COMMANDS == {0x00, 0x01, 0x03, 0x04, 0x09, 0x0B, 0x0D, 0x16, 0x18, 0x1A, 0x1B, 0x27, 0x2B, 0x32}
 
 
 @pytest.mark.parametrize("command", [p.CMD_CLEAR_STATISTICS, p.CMD_CALIBRATE_MAP])

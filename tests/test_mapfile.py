@@ -9,7 +9,8 @@ from openpclink.logfile import PcLogger, read_log
 from openpclink.mapfile import MapFile, OfflineEcu, compare
 from openpclink.sim import PtyServer, SimEcu
 from openpclink.transports import SerialTransport
-from openpclink.views import axis_cell, heat_colour, histogram_bins
+from openpclink.logviews import histogram_bins
+from openpclink.views import axis_cell, heat_colour
 
 
 @pytest.fixture(scope="module")

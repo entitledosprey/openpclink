@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_submodules
 
-hiddenimports = ['openpclink.cli', 'openpclink.gui', 'openpclink.link_helper', 'serial.tools.list_ports']
+hiddenimports = ['openpclink.cli', 'openpclink.gui', 'openpclink.link_helper', 'serial.tools.list_ports', 'PySide6.QtMultimedia']
 hiddenimports += collect_submodules('pyftdi')
 hiddenimports += collect_submodules('usb')
 
@@ -15,7 +15,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['unicorn', 'pefile', 'openpclink.rules', 'PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets', 'PySide6.QtQml', 'PySide6.QtQuick', 'PySide6.Qt3DCore', 'PySide6.QtMultimedia', 'PySide6.QtPdf', 'tkinter'],
+    excludes=['unicorn', 'pefile', 'openpclink.rules', 'PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets', 'PySide6.QtQml', 'PySide6.QtQuick', 'PySide6.Qt3DCore', 'PySide6.QtPdf', 'tkinter'],
     noarchive=False,
     optimize=0,
 )

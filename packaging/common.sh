@@ -23,6 +23,6 @@ PY
         --collect-submodules pyftdi --collect-submodules usb \
         --exclude-module unicorn --exclude-module pefile --exclude-module openpclink.rules --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.QtWebEngineWidgets \
         --exclude-module PySide6.QtQml --exclude-module PySide6.QtQuick --exclude-module PySide6.Qt3DCore \
-        --exclude-module PySide6.QtMultimedia --exclude-module PySide6.QtPdf --exclude-module tkinter \
+        --hidden-import PySide6.QtMultimedia --exclude-module PySide6.QtPdf --exclude-module tkinter \
         "$@" packaging/entry.py
 }

@@ -192,6 +192,10 @@ class Database:
         self._cache[data_id] = parameter
         return parameter
 
+    def default_axis(self, data_id: int) -> list[float]:
+        """The breakpoints PCLink's Init Axis fills in for a parameter used as a table axis."""
+        return [float(item) for item in _csv_values(self._prop(data_id, "DefaultAxis")) if item.strip().lstrip("-").replace(".", "", 1).isdigit()]
+
     def controllers(self) -> dict[int, list[int]]:
         """For each parameter, the parents whose current option decides if it shows."""
         if self._controllers is None:

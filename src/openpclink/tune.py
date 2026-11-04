@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import bisect
+import struct
 from dataclasses import dataclass, field
 
 from .logfile import Log
@@ -31,6 +32,14 @@ def quick_trim_value(cell: float, measured: float, target: float, correction_per
 
 def is_additive(table_id: int, dual_mode: float) -> bool:
     return not (table_id == FUEL_TABLE_1 or (table_id == FUEL_TABLE_2 and dual_mode == 1))
+
+
+def lookup_target(table: tuple[list[float], list[float], list[float]] | None, rpm: float, load: float, overlay: float = 0.0) -> float | None:
+    """The lambda target from table 3890 when the runtime target 2936 is absent, with the AFR overlay added."""
+    if table is None:
+        return None
+    xs, ys, values = table
+    return bilinear(xs, ys, values, rpm, load) + overlay
 
 
 def bilinear(xs: list[float], ys: list[float], values: list[float], x: float, y: float) -> float:
@@ -63,6 +72,12 @@ def cell_bounds(axis: list[float], index: int) -> tuple[float, float, float]:
     low = (axis[index - 1] + centre) / 2 if index > 0 else centre - (axis[1] - centre) / 2 if len(axis) > 1 else centre
     high = (axis[index + 1] + centre) / 2 if index + 1 < len(axis) else centre + (centre - axis[-2]) / 2 if len(axis) > 1 else centre
     return low, high, centre
+
+
+def neighbour_bounds(axis: list[float], index: int) -> tuple[float, float, float]:
+    """What Quick Tune measures its centre test against: the breakpoint either side and the cell's own (PCLink 0044ddf8)."""
+    last = len(axis) - 1
+    return axis[max(index - 1, 0)], axis[min(index + 1, last)], axis[index]
 
 
 class CellMarks:
@@ -101,6 +116,21 @@ class CellMarks:
         self.flags.clear()
 
 
+def within_centre(value: float, cell: tuple[float, float, float], tolerance: float) -> bool:
+    low, high, centre = cell
+    reach = (high - low) * tolerance / 100
+    return centre - reach < value <= centre + reach
+
+
+QT_NAMES = {
+    "table_index": "Table", "wideband_index": "WBSourcesItem", "tune_ahead": "TuneAhead", "filter": "Filter", "precision": "Precision",
+    "time_in_centre": "TimeInCellCenter", "max_attempts": "MaxAutoAttempts", "load_tolerance": "LoadCenterTollerace",
+    "rpm_tolerance": "RPMCenterTollerace", "rpm_lower": "RPMLockoutLower", "rpm_upper": "RPMLockoutUpper",
+    "load_lower": "LoadLockoutLower", "load_upper": "LoadLockoutUpper", "ect_lockout": "ECTLockout",
+    "gauge_minimum": "GaugeMinimum", "gauge_maximum": "GaugeMaximum", "tune_ahead_trim": "TuneAheadTrim",
+}
+
+
 @dataclass
 class QuickTuneSettings:
     """PCLink's defaults."""
@@ -122,6 +152,19 @@ class QuickTuneSettings:
     gauge_minimum: float = 0.7
     gauge_maximum: float = 1.2
     tune_ahead_trim: float = 2.5
+
+
+    def to_options(self) -> dict:
+        return {QT_NAMES[name]: getattr(self, name) for name in QT_NAMES}
+
+    def load_options(self, saved: dict) -> None:
+        """Take what an options file holds, keeping the type of each default."""
+        for name, key in QT_NAMES.items():
+            if key in saved:
+                try:
+                    setattr(self, name, type(getattr(self, name))(saved[key]))
+                except (TypeError, ValueError):
+                    pass
 
 
 OFF, MANUAL, AUTOMATIC = 0, 1, 2
@@ -186,46 +229,40 @@ class QuickTune:
         if self.mode == OFF:
             return Status("OFF", "Quick tune is off.")
         if not inputs.has_table:
-            return Status("Fuel table undefined", "Select a fuel table.")
+            return Status("Fuel table undefined", "Target fuel table not defined.")
         if inputs.target is None:
-            return Status("Oxy target undefined", "Set up a lambda target table.")
+            return Status("Oxy target undefined", "The Oxy target is not defined.")
         if self.measured == 0:
-            return Status("No WB Signal", "There is no wideband signal.", 0xFF)
+            return Status("No WB Signal", "No WB signal is present or configured.", 0xFF)
         if not inputs.table_active:
-            return Status("Table Inactive", "The selected fuel table is not active.")
+            return Status("Table Inactive", "Selected table is not active.")
         if s.ect_lockout > inputs.ect:
-            return Status("ECT Lockout", "The engine is below the ECT lockout.", 0xFF)
+            return Status("ECT Lockout", "Engine coolant temperature is not above the ECT lockout.", 0xFF)
         if not s.rpm_lower <= inputs.rpm <= s.rpm_upper:
-            return Status("RPM Lockout", "Engine speed is outside the RPM lockouts.", 0xFF)
+            return Status("RPM Lockout", "RPM is not between the upper and lower RPM lockouts.", 0xFF)
         if not s.load_lower <= inputs.load <= s.load_upper:
-            return Status("Load Lockout", "Load is outside the load lockouts.", 0xFF)
+            return Status("Load Lockout", "Load is not between the upper and lower Load lockouts.", 0xFF)
         if not self._centred(inputs):
             return Status("Not in cell centre", "Not in cell centre", 0x0482FF)
         if self.started is None:
             self.started = inputs.now
         if inputs.now - self.started < s.time_in_centre:
             text = f"Waiting ({attempts})" if attempts else "Waiting..."
-            return Status(text, "Waiting for the time in cell centre.", centred=True)
+            return Status(text, "Waiting for time in Cell centre to expire.", centred=True)
         within = abs(self.target - self.measured) < s.precision
         if self.mode == AUTOMATIC and (within or tuned):
-            return Status("Target Reached", "This cell has reached its target.", 0x8000, centred=True, may_tune=self.running)
+            return Status("Target Reached", "The measured AFR is within the specified precision of the target.", 0x8000, centred=True, may_tune=self.running)
         if self.mode != AUTOMATIC or attempts < s.max_attempts:
             return Status("Ready", "Ready", 0x8000, ready=True, centred=True, may_tune=True)
-        return Status("Max Attempts", "This cell has used its maximum tuning attempts.", centred=True, may_tune=True)
+        return Status("Max Attempts", "The maximum number of auto attempts for these current cell has been reached.", centred=True, may_tune=True)
 
     def _centred(self, inputs: TuneInputs) -> bool:
         s = self.settings
         if inputs.rpm_cell is None:
             return False
-        low, high, centre = inputs.rpm_cell
-        reach = (high - low) * s.rpm_tolerance / 100
-        if not centre - reach <= inputs.rpm <= centre + reach:
+        if not within_centre(inputs.rpm, inputs.rpm_cell, s.rpm_tolerance):
             return False
-        if inputs.load_cell is None:
-            return True
-        low, high, centre = inputs.load_cell
-        reach = (high - low) * s.load_tolerance / 100
-        return centre - reach <= inputs.load <= centre + reach
+        return inputs.load_cell is None or within_centre(inputs.load, inputs.load_cell, s.load_tolerance)
 
     def tune_ahead(self, row: int, column: int, value: float, rows: int, columns: int, tuned) -> list[tuple[int, int, float]]:
         """Cells to change after a step; `tuned(row, column)` protects finished cells."""
@@ -310,7 +347,7 @@ class MixtureSettings:
         for prefix, series, transient in (("Cond", "CondFilter", False), ("Delta", "DeltaFilter", True)):
             for n in (1, 2, 3):
                 s.filters.append((
-                    int(number(f"{series}{n}SeriesDataID", 0)), a.get(f"{prefix}{n}Greater") == "true",
+                    int(number(f"{series}{n}SeriesDataID", 0)), a.get(f"{prefix}{n}Greater", "true") == "true",
                     number(f"{prefix}{n}Value", 0.0), transient, a.get(f"{prefix}{n}Enabled") == "true",
                 ))
         return s
@@ -333,6 +370,10 @@ class MixtureSettings:
             a[f"{prefix}{n}Value"] = f"{value:g}"
             a[f"{prefix}{n}Enabled"] = flag(enabled)
         return a
+
+
+def _single(value: float) -> float:
+    return struct.unpack("<f", struct.pack("<f", value))[0]
 
 
 class MixtureError(Exception):
@@ -360,7 +401,7 @@ def _passes(log: Log, settings: MixtureSettings, when: float) -> bool:
     return True
 
 
-def build_mixture_map(log: Log | None, settings: MixtureSettings, xs: list[float], ys: list[float], target_lookup) -> list[list[MixtureCell]]:
+def build_mixture_map(log: Log | None, settings: MixtureSettings, xs: list[float], ys: list[float], target_lookup, progress=None) -> list[list[MixtureCell]]:
     """Averages logged mixture by fuel table cell. `target_lookup(rpm, load2)` is the target table."""
     if log is None:
         raise MixtureError("No log file found.")
@@ -385,8 +426,12 @@ def build_mixture_map(log: Log | None, settings: MixtureSettings, xs: list[float
     if len(rpm.times) < 2:
         return grid
     when = rpm.times[0]
-    while when <= rpm.times[-1]:
+    steps = int(_single(_single(rpm.times[-1]) - _single(when)) / _single(period))  # PCLink holds log times as 4-byte floats.
+    for done in range(steps):
+        if progress is not None and done % max(steps // 10, 1) == 0:
+            progress(done / steps)
         x, y = rpm.value_at(when), load.value_at(when)
+        when += period  # PCLink reads the mixture and target one step on from the engine's place.
         for row in grid:
             for cell in row:
                 x_low = cell.x[0] + (cell.x[2] - cell.x[0]) * shrink
@@ -397,7 +442,6 @@ def build_mixture_map(log: Log | None, settings: MixtureSettings, xs: list[float
                     cell.actual.append(mixture.value_at(when))
                     cell.target.append(target_series.value_at(when) if target_series else target_lookup(x, load2.value_at(when)))
                     cell.samples += 1
-        when += period
     for row in grid:
         for cell in row:
             if settings.min_samples_enabled and cell.samples < settings.min_samples:
@@ -441,3 +485,21 @@ def fft_magnitudes(samples: list[float]) -> list[float]:
                 c_r, c_i = c_r * w_r - c_i * w_i, c_r * w_i + c_i * w_r
         size *= 2
     return [math.hypot(real[i], imag[i]) / n for i in range(n // 2)]
+
+
+def mixture_palette() -> list[tuple[int, int, int]]:
+    """FUN_0048335c: eight bands, green first, yellow in the middle, red last, the rest worked between."""
+    colours = []
+    for k in range(8):
+        if k <= 4:
+            colours.append((round(255 * k / 4), 255, 0))
+        else:
+            colours.append((255, round(255 * (1 - (k - 4) / 3)), 0))
+    return colours
+
+
+def mixture_band(error: float, full_scale: float) -> tuple[int, int, int]:
+    palette = mixture_palette()
+    if full_scale <= 0:
+        return palette[-1]
+    return palette[max(0, min(int(error / full_scale * len(palette)), len(palette) - 1))]

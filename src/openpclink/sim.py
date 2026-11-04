@@ -7,6 +7,7 @@ own; docs/VERIFICATION.md says what has been checked against what.
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 import select
@@ -72,6 +73,7 @@ class SimEcu:
         self.log_tick_rate = 1000
         self.log_magic = 0xA5A55A5A
         self.log_max_channels = 32
+        self.log_max_rate = 100000
         self.logging_paused = False
         self.memo = ""
         self.memo_buffer = bytearray()
@@ -85,19 +87,32 @@ class SimEcu:
         self.firmware_body = bytearray()
         self.firmware_header = b""
         self.comms_values: dict[int, dict] = {}
+        self.clock_sets: list[bytes] = []
         self.writes: list[bytes] = []
         self.state = 1
+        self.comms_state = 1
+        self.comms_firmware: tuple[int, int, int] | None = None
+        self.boot_info_answers = True
+        self.chunk_naks: dict[tuple[int, int], list[int]] = {}
+        self._image_index = -1
+        self._chunk_number = 0
         self._build(map_xml)
         self.flash = bytes(self.memory)
+        self.factory_image = bytes(self.memory)
+        self.flash_updates_version = True
         self._start = time.monotonic()
 
     def _build(self, map_xml: bytes | None) -> None:
         entries = self._parse_map(map_xml) if map_xml else self._demo_entries()
+        if self.hardware_family == 0x3EF or self.hardware_family > 0x3F3:
+            self._take_comms(entries)
         runtime = [entry for entry in entries if entry["runtime"]]
         config = [entry for entry in entries if not entry["runtime"]]
         descriptor = bytearray()
         image_rt, image_cfg = bytearray(), bytearray()
         self.offsets: dict[int, int] = {}
+        self.encodings: dict[int, tuple[int, bool, float, float]] = {}
+        self.held: dict[int, float] = {}
         for ordered, image in ((runtime, image_rt), (config, image_cfg)):
             bit_pos = 0
             for entry in ordered:
@@ -111,6 +126,19 @@ class SimEcu:
         for data_id, offset in list(self.offsets.items()):
             if data_id in self._config_ids:
                 self.offsets[data_id] = offset + self.runtime_size
+
+    def _take_comms(self, entries: list[dict]) -> None:
+        """A G5 keeps its network, clock and logging settings (ids from 10000) on the comms processor."""
+        for entry in [entry for entry in entries if entry["id"] >= 10000]:
+            entries.remove(entry)
+            values = entry["values"]
+            if entry["kind"] == 8:
+                item = {"kind": 7, "count": entry["count"], "text": entry["text"]}
+            elif len(values) > 1:
+                item = {"kind": 5 if entry["kind"] == 1 and entry["multi"] != 1 else 8, "count": len(values), "values": [int(v) for v in values]}
+            else:
+                item = {"kind": 2, "count": 1, "value": int(values[0]) if values else 0}
+            self.comms_values.setdefault(entry["id"], item)
 
     _config_ids: set[int] = set()
 
@@ -161,6 +189,8 @@ class SimEcu:
         if array and count >= 256:
             descriptor += struct.pack(">I", count)
         self.offsets[data_id] = len(image)
+        if not array:
+            self.encodings[data_id] = (width, signed, scale, add)
         for raw in raws:
             image += int(raw).to_bytes(width, "big", signed=signed)
         return 0
@@ -233,12 +263,51 @@ class SimEcu:
         self.addr = addr
         if cmd == p.CMD_FILE and addr == p.ADDR_MAIN and struct.unpack_from(">I", payload)[0] == p.FILE_STREAM:
             return self._stream_file(addr, payload)
+        if addr == p.ADDR_COMMS and cmd in (p.CMD_COMMS_POLL_A, p.CMD_COMMS_POLL_B) and self.comms_values:
+            return self._comms_changes(cmd)
         try:
             return p.build_reply(addr, cmd, self._dispatch(cmd, payload))
         except SimRefusal as refusal:
             return p.build_reply(addr, p.CMD_ERROR, struct.pack(">H", refusal.code))
         except KeyError:
             return p.build_reply(addr, p.CMD_ERROR, struct.pack(">H", p.ERR_UNSUPPORTED))
+
+    def add_comms_settings(self, ecu_xml: bytes) -> None:
+        """Answer for every id from 10000 in PCLink's ECU.xml that the map did not already supply."""
+        params = {int(n.get("DataId")): {q.get("Name"): q.get("Value") for q in n.iter("Property")} for n in ET.fromstring(ecu_xml).find("Parameters") if n.get("DataId", "").isdigit()}
+
+        def prop(data_id: int, name: str) -> str | None:
+            node = params.get(data_id, {})
+            if name in node:
+                return node[name]
+            return prop(int(node["CopyFromID"]), name) if node.get("CopyFromID") else None
+
+        for data_id in sorted(i for i in params if i >= 10000 and i not in self.comms_values):
+            kind, columns = prop(data_id, "Type"), int(prop(data_id, "ColCount") or 1)
+            low, high = float(prop(data_id, "Min") or 0), float(prop(data_id, "Max") or 0)
+            if kind == "8":
+                item = {"kind": 7, "count": 24 if data_id > 10100 else 50, "text": ""}
+            elif columns > 1:
+                item = {"kind": 8, "count": columns, "values": [0] * columns}
+            elif kind == "0":
+                item = {"kind": 1, "count": 1, "value": 0.0}
+            else:
+                item = {"kind": 2, "count": 1, "value": 0}
+            item.update(min=low, max=high)
+            self.comms_values[data_id] = item
+
+    def _comms_changes(self, cmd: int) -> bytes:
+        """07: the values that changed since the last poll, then a 07 reply. 0A: every value, then a 0A reply."""
+        now = time.localtime()
+        for data_id, field in zip(range(10118, 10124), now[:6]):
+            if data_id in self.comms_values:
+                self.comms_values[data_id]["value"] = field
+        ids = sorted(self.comms_values) if cmd == p.CMD_COMMS_POLL_B else [i for i in range(10118, 10124) if i in self.comms_values]
+        frames = []
+        for data_id in ids:
+            item = self.comms_values[data_id]
+            frames.append(p.build_reply(p.ADDR_COMMS, p.CMD_COMMS_READ, struct.pack(">HHHhH", 0, item["kind"], data_id, -1, item.get("count", 1)) + self._comms_value(item)))
+        return b"".join(frames) + p.build_reply(p.ADDR_COMMS, cmd, struct.pack(">H", 1))
 
     def _stream_file(self, addr: int, payload: bytes) -> bytes:
         """PCLink's faster download: many replies to one request, then a 00 01 reply."""
@@ -257,6 +326,8 @@ class SimEcu:
         rt, cfg = self.runtime_size, self.config_size
         if cmd == p.CMD_STATE:
             return struct.pack(">H", self.state)
+        if cmd == p.CMD_COMMS_STATUS and self.comms_values:
+            return _crc_block(0, bytes(0x54 - 8))
         if cmd in (p.CMD_BOOT_INFO, p.CMD_FIRMWARE_INFO):
             return self._info(cmd)
         if cmd == p.CMD_IDENTITY:
@@ -298,7 +369,7 @@ class SimEcu:
             if self.engine_running:
                 raise SimRefusal(ERROR_ENGINE_RUNNING)
             self.factory_resets += 1
-            self.memory[rt : rt + cfg] = bytes(cfg)
+            self.memory[rt : rt + cfg] = self.factory_image[rt : rt + cfg]
             self.flash = bytes(self.memory)
             return struct.pack(">H", 1)
         raise KeyError(cmd)
@@ -309,6 +380,7 @@ class SimEcu:
             body = bytearray(0x17)
             struct.pack_into(">IH", body, 0, self.log_tick_rate, len(self.ecu_logs))
             struct.pack_into(">IH", body, 0x0D, self.log_magic, self.log_max_channels)
+            struct.pack_into(">I", body, 0x13, self.log_max_rate)
             self.log_cursor = 0
             return bytes(body)
         if cmd == p.CMD_FILE:
@@ -348,22 +420,33 @@ class SimEcu:
 
     def _firmware_step(self, cmd: int, payload: bytes) -> bytes:
         ok = struct.pack(">H", 1)
+        comms = self.addr == p.ADDR_COMMS
+        state = self.comms_state if comms else self.state
         if cmd == p.CMD_FW_RESET:
             self.firmware_stage.append("reset")
+            if state == 3 and self.firmware_body:
+                self._flashed_version(comms)
+            state = 1
         elif cmd == p.CMD_FW_REQUEST_BOOT:
             if self.engine_running:
                 raise SimRefusal(ERROR_ENGINE_RUNNING)
-            self.state = 3
+            state = 3
             self.firmware_stage.append("boot")
-        elif self.state != 3:
+        elif state != 3:
             raise SimRefusal(3)
         elif cmd == p.CMD_FW_START:
             self.firmware_stage.append("start")
             self.firmware_body = bytearray()
+            self._image_index += 1
+            self._chunk_number = 0
         elif cmd == p.CMD_FW_HEADER:
             self.firmware_stage.append("header")
             self.firmware_header = bytes(payload)
         elif cmd == p.CMD_FW_DATA:
+            naks = self.chunk_naks.get((self._image_index, self._chunk_number))
+            if naks:
+                raise SimRefusal(naks.pop(0))
+            self._chunk_number += 1
             address, words = struct.unpack_from(">II", payload)
             expected = struct.unpack_from(">I", self.firmware_header, 20)[0] + len(self.firmware_body)
             if address != expected or words * 4 != len(payload) - 8:
@@ -371,8 +454,22 @@ class SimEcu:
             self.firmware_body += payload[8:]
         elif cmd == p.CMD_FW_REQUEST_MAIN:
             self.firmware_stage.append("main")
-            self.state = 1
+            state = 1
+            self._flashed_version(comms)
+        if comms:
+            self.comms_state = state
+        else:
+            self.state = state
         return ok
+
+    def _flashed_version(self, comms: bool) -> None:
+        """A programmed image becomes the running version, as it should on a real ECU."""
+        if self.flash_updates_version and len(self.firmware_header) >= 13:
+            version = (self.firmware_header[8], *struct.unpack_from(">HH", self.firmware_header, 9))
+            if comms:
+                self.comms_firmware = version
+            else:
+                self.firmware = version
 
     def _scope(self, payload: bytes) -> bytes:
         sub, a, b = struct.unpack(">HHH", payload)
@@ -463,7 +560,14 @@ class SimEcu:
                 else:
                     item["values"][where] = value
             return struct.pack(">HHHhH", 0, item["kind"], data_id, -1, item.get("count", 1)) + self._comms_value(item)
-        if cmd in (p.CMD_STORE, p.CMD_SET_CLOCK):
+        if cmd == p.CMD_COMMS_STAMP:
+            body = bytearray(2 + 2 + 2 + 2 + 4 + 20 + 64 + 2 + 2)
+            struct.pack_into(">H", body, 4, len(body))
+            return bytes(body)
+        if cmd == p.CMD_SET_CLOCK:
+            self.clock_sets.append(payload)
+            return ok
+        if cmd == p.CMD_STORE:
             return ok
         if cmd == CMD_FACTORY_RESET:
             self.factory_resets += 1
@@ -471,7 +575,7 @@ class SimEcu:
         if cmd in (p.CMD_FW_RESET, p.CMD_FW_REQUEST_BOOT, p.CMD_FW_START, p.CMD_FW_HEADER, p.CMD_FW_DATA, p.CMD_FW_REQUEST_MAIN):
             return self._firmware_step(cmd, payload)
         if cmd == p.CMD_STATE:
-            return struct.pack(">H", self.state)
+            return struct.pack(">H", self.comms_state)
         raise KeyError(cmd)
 
     @staticmethod
@@ -483,7 +587,9 @@ class SimEcu:
         return b"".join(struct.pack(code, value) for value in values)
 
     def _info(self, cmd: int) -> bytes:
-        major, minor, patch = self.firmware
+        if not self.boot_info_answers and (self.comms_state if self.addr == p.ADDR_COMMS else self.state) == 3:
+            raise SimRefusal(3)
+        major, minor, patch = self.comms_firmware if self.addr == p.ADDR_COMMS and self.comms_firmware else self.firmware
         body = bytearray(0x52 - 8)
         body[0] = major
         struct.pack_into(">HH", body, 1, minor, patch)
@@ -492,11 +598,38 @@ class SimEcu:
             struct.pack_into(">H", body, 0x48 - 8, self.hardware_family)
         return _crc_block(0 if cmd == p.CMD_BOOT_INFO else 1, bytes(body))
 
+    def set_value(self, data_id: int, value: float) -> None:
+        """Hold a scalar parameter at a value, encoded the way the firmware would."""
+        self.held[data_id] = value
+        self._store(data_id, value)
+
+    def _store(self, data_id: int, value: float) -> None:
+        width, signed, scale, add = self.encodings[data_id]
+        raw = round((value - add) / scale) if scale else 0
+        low, high = (-(1 << (8 * width - 1)), (1 << (8 * width - 1)) - 1) if signed else (0, (1 << (8 * width)) - 1)
+        offset = self.offsets[data_id]
+        self.memory[offset : offset + width] = max(low, min(high, raw)).to_bytes(width, "big", signed=signed)
+
+    def _control(self) -> None:
+        """Test harness: OPENPCLINK_SIM_CONTROL names a JSON file of {data id: value} to hold live."""
+        path = os.environ.get("OPENPCLINK_SIM_CONTROL")
+        if not path:
+            return
+        try:
+            with open(path) as handle:
+                values = json.load(handle)
+        except (OSError, ValueError):
+            return
+        self.held.update({int(i): float(v) for i, v in values.items() if int(i) in self.encodings})
+
     def _tick(self) -> None:
+        self._control()
         offset = self.offsets.get(RPM_ID)
-        if offset is not None:
+        if offset is not None and RPM_ID not in self.held:
             rpm = int(2500 + 1500 * math.sin(time.monotonic() - self._start)) if self.engine_running else 0
             self.memory[offset : offset + 2] = struct.pack(">H", max(rpm, 0) & 0xFFFF)
+        for data_id, value in self.held.items():
+            self._store(data_id, value)
 
     def reboot(self) -> None:
         """Lose RAM changes, as an ECU power cycle does."""

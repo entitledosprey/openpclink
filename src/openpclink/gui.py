@@ -13,28 +13,43 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from . import __version__
 from .crypto import BadContainer, ProtectedFile
 from .database import MENU_ORDER, Database, DatabaseMissing, HelpManual, Parameter
-from . import assets, gauges, tools, tune
+from . import assets, faults, gauges, logfile, scope, security, tools, tune, tuningtools, viewdialogs
 from .assets import RuntimeConfig
 from .diagnostics import enable_log_file
-from .ecu import ENGINE_SPEED_ID, SECRET_IDS, TPS_CLOSED_ID, TPS_OPEN_ID, Ecu, EcuProtected, StoreUnconfirmed, WriteMismatch, WriteRefused
+from .ecu import ENGINE_SPEED_ID, SECRET_IDS, TPS_CLOSED_ID, TPS_OPEN_ID, WIFI_PASSWORD_ID, Ecu, EcuProtected, StoreUnconfirmed, TrapMode, WriteMismatch, WriteRefused
 from .eculog import EcuLogError
 from .gauges import GAUGE_TYPES, Gauge, Reading
 from .importer import ImportFailed, import_pclink, rules_table_path
 from .layoutfile import GROUP_ALL, Layout, LayoutError, LayoutPage, LayoutView
-from .logfile import LogFormatError, PcLogger, read_log, save_log
+from .logfile import LogFormatError, PcLogger, SampleHistory, read_log, save_log
+from .logsetup import playback_interval
 from .logviews import LOG_VIEW_TYPES, LogSession, MixtureMapView, VehiclePlan
-from .options import Options, OptionsDialog
+from .manual import ManualWindow
+from .paramspanel import ParametersPanel
+from .options import Options, OptionsDialog, default_options_path
 from .theme import theme_named
 from .units import UnitSystem
-from .workspace import LiveView, ViewFrame, Workspace
-from .mapfile import MapError, MapFile, OfflineEcu, compare
+from .workspace import Indicators, IndicatorLabel, LiveView, RateMeter, ViewFrame, Workspace
+from .layout import TYPE_STRING
+from .mapfile import MapError, MapFile, OfflineEcu
 from .protocol import READ_ONLY_ENV, EcuError, ForbiddenCommand, ProtocolError
 from .native_rules import NativeRules, RulesTable
-from .views import SurfaceView, axis_cell, heat_colour, used_axis_length
-from .transports import TransportError, list_ports, open_transport
+from .views import axis_cell, used_axis_length
+from .tables import ParameterForm, TableEditor, _SnakeOverlay
+from .transports import TransportError, discover_wifi, list_ports, open_transport
+from .wifi_dialog import WifiSelectionDialog
 
 POLL_INTERVAL_S = 0.1
+SLOW_CONNECTION_SCALE = 4.0
 ID_ROLE = QtCore.Qt.ItemDataRole.UserRole
+NAME_ROLE = QtCore.Qt.ItemDataRole(ID_ROLE + 1)
+SIGNAL_STRENGTH_ID = 10179
+FEATURE_ENABLE_ID = 1555
+
+
+def _node_name(item) -> str:
+    """A tree entry's menu name, which its label may add a live value to."""
+    return item.data(0, NAME_ROLE) or item.text(0)
 MANY_OPTIONS = 12
 SNAKE_LENGTH = 64
 PLAYBACK_INTERVAL_MS = 25
@@ -52,6 +67,7 @@ def used_axis(ecu, axis_id: int | None) -> list[float]:
 class Worker(QtCore.QThread):
     connected = QtCore.Signal(object, bool)
     disconnected = QtCore.Signal(str)
+    trapped = QtCore.Signal(str)
     runtime = QtCore.Signal()
     wrote = QtCore.Signal(int, int)
     failed = QtCore.Signal(str)
@@ -93,6 +109,7 @@ class Worker(QtCore.QThread):
         if job is None:
             if isinstance(self.ecu, Ecu):
                 self.ecu.poll_runtime()
+                self.ecu.poll_comms()
                 if self.logger:
                     self.logger.sample(self.ecu.get)
                 self.runtime.emit()
@@ -101,8 +118,19 @@ class Worker(QtCore.QThread):
         if name == "connect":
             self._close()
             ecu = Ecu(open_transport(args[0]), self.database)
+            if len(args) > 1 and args[1]:
+                ecu.link.timeout_scale = SLOW_CONNECTION_SCALE
             try:
                 info = ecu.connect()
+            except TrapMode:
+                try:
+                    report = ecu.trap_report()
+                except ProtocolError:
+                    report = ""
+                ecu.close()
+                self.trapped.emit(report)
+                self.disconnected.emit("")
+                return
             except Exception:
                 ecu.close()
                 raise
@@ -122,6 +150,8 @@ class Worker(QtCore.QThread):
             self.failed.emit("Not connected to an ECU.")
         elif name == "set":
             self._set_value(*args)
+        elif name == "set_cells":
+            self._guarded(lambda: self.ecu.set_cells(args[0], args[1]), args[0], 0)
         elif name == "set_string":
             self._guarded(lambda: self.ecu.set_string(args[0], args[1]), args[0], 0)
         elif name == "control":
@@ -273,170 +303,6 @@ class ConnectDialog(QtWidgets.QDialog):
         return item.data(ID_ROLE) if item else ""
 
 
-class _IgnoreWheel(QtCore.QObject):
-    """Stops the scroll wheel changing a setting while scrolling past it."""
-
-    def eventFilter(self, _watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
-        return event.type() == QtCore.QEvent.Type.Wheel
-
-
-class _PickableCombo(QtWidgets.QWidget):
-    """A setting with very many options, with PCLink's Select Item list beside it."""
-
-    def __init__(self, combo: QtWidgets.QComboBox, window: "MainWindow", data_id: int) -> None:
-        super().__init__()
-        self.combo, self.window_, self.data_id = combo, window, data_id
-        pick = QtWidgets.QToolButton()
-        pick.setText("…")
-        pick.clicked.connect(self._pick)
-        row = QtWidgets.QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(combo, 1)
-        row.addWidget(pick)
-
-    def _pick(self) -> None:
-        items = [(self.combo.itemData(i), self.combo.itemText(i)) for i in range(self.combo.count())]
-        dialog = tools.ItemPicker(items, self)
-        if dialog.exec() and dialog.value() is not None:
-            self.window_.choose_option(self.data_id, dialog.value())
-
-
-class ParameterForm(QtWidgets.QWidget):
-    """Edits the parameters of one menu entry."""
-
-    def __init__(self, window: "MainWindow") -> None:
-        super().__init__()
-        self.window_ = window
-        self.layout_ = QtWidgets.QFormLayout(self)
-        self.editors: dict[int, QtWidgets.QWidget] = {}
-        self.parameters: list[Parameter] = []
-        self.prefers_graph = False
-        self._wheel_guard = _IgnoreWheel(self)
-
-    def show_parameters(self, parameters: list[Parameter]) -> None:
-        # Deferred: an editor being replaced may be mid-signal or hold focus.
-        while self.layout_.rowCount():
-            row = self.layout_.takeRow(0)
-            for item in (row.labelItem, row.fieldItem):
-                if item is not None and item.widget() is not None:
-                    item.widget().blockSignals(True)
-                    item.widget().hide()
-                    item.widget().deleteLater()
-        self.editors.clear()
-        self.parameters = parameters
-        for parameter in sorted(parameters, key=lambda item: -item.priority):
-            if not self.window_.parameter_visible(parameter.data_id):
-                continue
-            editor = self._build_editor(parameter)
-            if editor is not None:
-                self.layout_.addRow(parameter.caption, editor)
-                self.editors[parameter.data_id] = editor
-        self.refresh()
-
-    def _build_editor(self, parameter: Parameter) -> QtWidgets.QWidget | None:
-        ecu = self.window_.worker.ecu
-        if parameter.data_id in self.window_.ACTION_PARAMETERS:
-            button = QtWidgets.QPushButton(parameter.caption)
-            button.clicked.connect(lambda: self.window_.run_action_parameter(parameter.data_id))
-            return button
-        if ecu is None or parameter.data_id not in ecu.table or parameter.data_id in SECRET_IDS:
-            return None
-        loc = ecu.table[parameter.data_id]
-        data_id = parameter.data_id
-        read_only = loc.read_only or loc.offset < ecu.info.runtime_size
-        if loc.is_string and loc.width == 1:
-            edit = QtWidgets.QLineEdit()
-            edit.setMaxLength(loc.count)
-            edit.setReadOnly(read_only)
-            edit.editingFinished.connect(lambda: self._commit_text(data_id, edit))
-            return edit
-        if loc.is_bitfield and parameter.options:
-            combo = QtWidgets.QComboBox()
-            limit = (loc.mask >> loc.shift) + 1
-            link_id = ecu.info.link_id
-            for index, option in self.window_.database.visible_options(data_id, link_id):
-                if index < limit:
-                    combo.addItem(option, index)
-            combo.setEnabled(not read_only)
-            combo.activated.connect(lambda _: self.window_.choose_option(data_id, combo.currentData()))
-            combo.installEventFilter(self._wheel_guard)
-            if combo.count() > MANY_OPTIONS:
-                return _PickableCombo(combo, self.window_, data_id)
-            return combo
-        if loc.count > 1 and not loc.is_bitfield:
-            if len(self.parameters) > 1 and parameter.is_table:
-                button = QtWidgets.QPushButton("Open table…")
-                button.clicked.connect(lambda: self.window_.open_table_entry(data_id))
-                return button
-            table = TableEditor(self.window_, parameter, loc.count, read_only)
-            if self.prefers_graph and table.grid.rowCount() > 1:
-                table.toggle_graph()
-            return table
-        spin = QtWidgets.QDoubleSpinBox()
-        spin.setKeyboardTracking(False)
-        if loc.is_bitfield:
-            decimals = 0
-        else:
-            decimals = parameter.decimals if parameter.decimals is not None else (0 if loc.scale == 1 else 3)
-        spin.setDecimals(decimals)
-        kind = self.window_.kind_of(parameter)
-        spin.setDecimals(self.window_.units.decimals(decimals, kind))
-        low = self.window_.units.to_display(parameter.minimum, kind) if parameter.minimum is not None else -1e9
-        high = self.window_.units.to_display(parameter.maximum, kind) if parameter.maximum is not None else 1e9
-        spin.setRange(min(low, high), max(low, high))
-        spin.setSingleStep(abs(loc.scale) or 1)
-        units = self.window_.units_of(parameter)
-        spin.setSuffix(f" {units}" if units else "")
-        spin.setReadOnly(read_only)
-        spin.installEventFilter(self._wheel_guard)
-        spin.editingFinished.connect(lambda: self._commit_number(data_id, spin))
-        return spin
-
-    def _commit_text(self, data_id: int, edit: QtWidgets.QLineEdit) -> None:
-        if edit.isModified():
-            edit.setModified(False)
-            self.window_.write_text(data_id, edit.text())
-
-    def _commit_number(self, data_id: int, spin: QtWidgets.QDoubleSpinBox) -> None:
-        # Compare with what was displayed, not the ECU's value: a value rounded or
-        # clamped for display must never be written just because focus moved.
-        if not spin.isReadOnly() and spin.value() != spin.property("shown"):
-            spin.setProperty("shown", spin.value())
-            parameter = self.window_.database.parameter(data_id)
-            self.window_.write(data_id, self.window_.units.to_base(spin.value(), self.window_.kind_of(parameter)), 0)
-
-    def refresh(self, only: int | None = None) -> None:
-        ecu = self.window_.worker.ecu
-        if ecu is None:
-            return
-        for data_id, editor in self.editors.items():
-            if only is not None and data_id != only:
-                continue
-            try:
-                self._refresh_editor(ecu, data_id, editor)
-            except EcuProtected:
-                editor.setEnabled(False)
-
-    def _refresh_editor(self, ecu: Ecu, data_id: int, editor: QtWidgets.QWidget) -> None:
-        if isinstance(editor, QtWidgets.QPushButton):
-            return
-        if isinstance(editor, QtWidgets.QLineEdit):
-            if not editor.hasFocus():
-                editor.setText(ecu.get_string(data_id))
-        elif isinstance(editor, _PickableCombo):
-            editor.combo.setCurrentIndex(editor.combo.findData(int(ecu.get(data_id))))
-        elif isinstance(editor, QtWidgets.QComboBox):
-            editor.setCurrentIndex(editor.findData(int(ecu.get(data_id))))
-        elif isinstance(editor, TableEditor):
-            editor.refresh()
-        elif isinstance(editor, QtWidgets.QDoubleSpinBox) and not editor.hasFocus():
-            editor.blockSignals(True)
-            parameter = self.window_.database.parameter(data_id)
-            editor.setValue(self.window_.units.to_display(ecu.get(data_id), self.window_.kind_of(parameter)))
-            editor.setProperty("shown", editor.value())
-            editor.blockSignals(False)
-
-
 class StatusWindow(QtWidgets.QWidget):
     """The ECU's status, led by its fault code. Read-only, and it updates live."""
 
@@ -496,372 +362,8 @@ class StatusWindow(QtWidgets.QWidget):
         code = int(ecu.get(self.FAULT_CODE_ID))
         count = int(ecu.get(self.FAULT_COUNT_ID)) if self.FAULT_COUNT_ID in ecu.table else None
         counted = f" ({count} active)" if count is not None else ""
-        self.fault.setText(f"Fault code: {self._text(self.FAULT_CODE_ID)}{counted}" if code else "No fault codes.")
+        self.fault.setText(f"{faults.fault_text(self.window_.database, code)}{counted}" if code else "No fault codes.")
         self.fault.setStyleSheet("color:#a12626;font-weight:bold" if code else "color:#1b7f3b;font-weight:bold")
-
-
-class _SnakeOverlay(QtWidgets.QWidget):
-    """The trail of cells the engine has just been through."""
-
-    enabled_trail = True
-    paused = False
-
-    def __init__(self, grid: QtWidgets.QTableWidget) -> None:
-        super().__init__(grid.viewport())
-        self.grid = grid
-        self.points: list[tuple[int, int]] = []
-        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        grid.viewport().installEventFilter(self)
-
-    def eventFilter(self, _watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
-        if event.type() == QtCore.QEvent.Type.Resize:
-            self.resize(self.grid.viewport().size())
-        return False
-
-    def add(self, position: tuple[int, int]) -> None:
-        if _SnakeOverlay.paused or not _SnakeOverlay.enabled_trail:
-            if not _SnakeOverlay.enabled_trail and self.points:
-                self.points.clear()
-                self.update()
-            return
-        self.points.append(position)
-        del self.points[: max(len(self.points) - SNAKE_LENGTH, 0)]
-        self.update()
-
-    def paintEvent(self, _event: QtGui.QPaintEvent) -> None:
-        if len(self.points) < 2 or not _SnakeOverlay.enabled_trail:
-            return
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-        painter.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0), 2))
-        line = QtGui.QPolygonF()
-        for row, column in self.points:
-            item = self.grid.item(row, column)
-            if item is not None:
-                line.append(QtCore.QPointF(self.grid.visualItemRect(item).center()))
-        painter.drawPolyline(line)
-
-
-class TableEditor(QtWidgets.QWidget):
-    """A tuning table: heat map, live position, bulk edits, axes and 3D view."""
-
-    def __init__(self, window: "MainWindow", parameter: Parameter, count: int, read_only: bool) -> None:
-        super().__init__()
-        self.window_ = window
-        self.parameter = parameter
-        self.read_only = read_only
-        columns = parameter.columns if parameter.columns > 1 else count
-        self.grid = QtWidgets.QTableWidget(max(count // columns, 1), columns)
-        self.grid.setMinimumHeight(min(90 + self.grid.rowCount() * 30, 480))
-        self.grid.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.grid.horizontalHeader().setDefaultSectionSize(58)
-        if parameter.column_labels:
-            self.grid.setHorizontalHeaderLabels(list(parameter.column_labels)[:columns])
-        if parameter.row_labels:
-            self.grid.setVerticalHeaderLabels(list(parameter.row_labels)[:self.grid.rowCount()])
-        if read_only:
-            self.grid.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.grid.itemChanged.connect(self._commit_cell)
-        self.grid.installEventFilter(self)
-        self.grid.horizontalHeader().sectionDoubleClicked.connect(lambda i: self._edit_axis(parameter.column_axis_id, i))
-        self.grid.verticalHeader().sectionDoubleClicked.connect(lambda i: self._edit_axis(parameter.row_axis_id, i))
-        self.surface = SurfaceView()
-        self.stack = QtWidgets.QStackedWidget()
-        self.stack.addWidget(self.grid)
-        self.stack.addWidget(self.surface)
-        toggle = QtWidgets.QPushButton("Grid / 3D")
-        toggle.clicked.connect(self.toggle_graph)
-        self.snake = _SnakeOverlay(self.grid)
-        toggle.setEnabled(self.grid.rowCount() > 1)
-        hint = QtWidgets.QLabel("+ / − nudge,  = set,  * scale %,  N Y Z markers,  X axes,  M Quick Trim,  Ctrl+I interpolate,  K graph")
-        hint.setEnabled(False)
-        controls = QtWidgets.QHBoxLayout()
-        controls.addWidget(hint)
-        controls.addStretch()
-        controls.addWidget(toggle)
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addLayout(controls)
-        layout.addWidget(self.stack)
-        self.trace: tuple[int, int] | None = None
-
-    def toggle_graph(self) -> None:
-        self.stack.setCurrentIndex(1 - self.stack.currentIndex())
-
-    def _selected_cells(self) -> list[tuple[int, int]]:
-        return sorted({(index.row(), index.column()) for index in self.grid.selectedIndexes()})
-
-    def _kind(self) -> str:
-        return self.window_.kind_of(self.parameter)
-
-    def _write_display(self, value: float, index: int) -> None:
-        self.window_.write(self.parameter.data_id, self.window_.units.to_base(value, self._kind()), index)
-
-    def _mark(self, bit: int) -> None:
-        self.window_.marks.toggle(self.parameter.data_id, self._selected_cells(), bit)
-        self.refresh()
-
-    def _interpolate_selection(self, by_row: bool, by_column: bool) -> None:
-        """Straight lines between the corners of the selection."""
-        cells = self._selected_cells()
-        if len(cells) < 2:
-            return
-        rows = sorted({row for row, _ in cells})
-        columns = sorted({column for _, column in cells})
-        def value(row: int, column: int) -> float:
-            return float(self.grid.item(row, column).text())
-        top, bottom, left, right = rows[0], rows[-1], columns[0], columns[-1]
-        for row in rows:
-            for column in columns:
-                fx = (column - left) / ((right - left) or 1) if by_column else 0.0
-                fy = (row - top) / ((bottom - top) or 1) if by_row else 0.0
-                base_row, base_column = (row if not by_row else top), (column if not by_column else left)
-                upper = value(base_row, left if by_column else base_column) + ((value(base_row, right) - value(base_row, left)) * fx if by_column else 0.0)
-                lower = value(bottom if by_row else base_row, left if by_column else base_column) + ((value(bottom if by_row else base_row, right) - value(bottom if by_row else base_row, left)) * fx if by_column else 0.0)
-                new = upper + (lower - upper) * fy
-                self._write_display(new, row * self.grid.columnCount() + column)
-
-    def _smooth_selection(self) -> None:
-        cells = set(self._selected_cells())
-        for row, column in cells:
-            around = [
-                float(self.grid.item(r, c).text())
-                for r in range(row - 1, row + 2) for c in range(column - 1, column + 2)
-                if self.grid.item(r, c) is not None and not self.grid.isRowHidden(r) and not self.grid.isColumnHidden(c)
-            ]
-            self._write_display(sum(around) / len(around), row * self.grid.columnCount() + column)
-
-    def _fill_right(self) -> None:
-        for row, column in self._selected_cells():
-            for c in range(column + 1, self.grid.columnCount()):
-                self._write_display(float(self.grid.item(row, column).text()), row * self.grid.columnCount() + c)
-
-    def _quick_trim(self) -> None:
-        window, ecu = self.window_, self.window_.worker.ecu
-        if self.parameter.data_id not in (tune.FUEL_TABLE_1, tune.FUEL_TABLE_2) or ecu is None:
-            return
-
-        def live(data_id: int) -> float:
-            return ecu.get(data_id) if data_id in ecu.table else 0.0
-
-        correction = live(tune.CL_CORRECTION) if live(tune.CL_MODE) else 0.0
-        dialog = tools.QuickTrimDialog(live(tune.LAMBDA_TARGET_RUNTIME), live(tune.LAMBDA_AVERAGE), correction, self)
-        if dialog.exec():
-            self._apply(lambda value: tune.quick_trim_value(value, dialog.measured.value(), dialog.target.value(), dialog.correction.value()))
-            window.statusBar().showMessage("Quick Trim applied.", 4000)
-
-    def _axis_setup(self) -> None:
-        ecu = self.window_.worker.ecu
-        ids = (self.parameter.column_axis_id, self.parameter.row_axis_id)
-        if ecu is None or self.read_only or not any(i in ecu.table for i in ids):
-            return
-        x_axis, y_axis = (ecu.get_all(i) if i in ecu.table else [] for i in ids)
-        dialog = tools.AxisSetupDialog(x_axis, y_axis, self)
-        if not dialog.exec():
-            return
-        for axis_id, old, new in zip(ids, (x_axis, y_axis), dialog.axes()):
-            for index, (before, after) in enumerate(zip(old, new)):
-                if before != after:
-                    self.window_.write(axis_id, after, index)
-        if dialog.interpolate.isChecked():
-            self._reinterpolate(x_axis, y_axis, *dialog.axes())
-
-    def _reinterpolate(self, old_x: list[float], old_y: list[float], new_x: list[float], new_y: list[float]) -> None:
-        """Keep the table's shape when its axes move."""
-        ecu = self.window_.worker.ecu
-        values = ecu.get_all(self.parameter.data_id)
-        columns = self.grid.columnCount()
-        for row in range(self.grid.rowCount()):
-            for column in range(columns):
-                x = new_x[column] if column < len(new_x) else 0.0
-                y = new_y[row] if row < len(new_y) else 0.0
-                new = tune.bilinear(old_x or [0.0], old_y or [0.0], values, x, y)
-                self.window_.write(self.parameter.data_id, new, row * columns + column)
-
-    def _step(self) -> float:
-        ecu = self.window_.worker.ecu
-        scale = abs(ecu.table[self.parameter.data_id].scale) if ecu else 1
-        if self.parameter.decimals is not None:
-            return max(10.0 ** -self.parameter.decimals, scale)
-        return scale or 1.0
-
-    def _index(self, item: QtWidgets.QTableWidgetItem) -> int:
-        return item.row() * self.grid.columnCount() + item.column()
-
-    def _commit_cell(self, item: QtWidgets.QTableWidgetItem) -> None:
-        if self.grid.signalsBlocked():
-            return
-        try:
-            value = float(item.text())
-        except ValueError:
-            self.window_.show_error(f"'{item.text()}' is not a number.")
-            self.refresh()
-            return
-        # Only a real edit may write: the text must differ from what the ECU holds.
-        ecu = self.window_.worker.ecu
-        decimals = self.parameter.decimals
-        held = ecu.get(self.parameter.data_id, self._index(item)) if ecu else None
-        held = None if held is None else self.window_.units.to_display(held, self._kind())
-        decimals = None if decimals is None else self.window_.units.decimals(decimals, self._kind())
-        shown = None if held is None else (f"{held:.{decimals}f}" if decimals is not None else f"{held:g}")
-        if item.text() != shown:
-            self._write_display(value, self._index(item))
-
-    def _apply(self, change) -> None:
-        """Apply a function to each selected cell."""
-        for item in self.grid.selectedItems():
-            self._write_display(change(float(item.text())), self._index(item))
-
-    def eventFilter(self, _watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
-        if event.type() != QtCore.QEvent.Type.KeyPress or self.grid.state() == self.grid.State.EditingState:
-            return False
-        key = event.key()
-        if event.matches(QtGui.QKeySequence.StandardKey.Copy):
-            self._copy()
-            return True
-        if self.read_only:
-            return False
-        if event.matches(QtGui.QKeySequence.StandardKey.Paste):
-            self._paste()
-            return True
-        control = event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier
-        shift = event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier
-        letters = {
-            QtCore.Qt.Key.Key_N: lambda: self._mark(tune.RUNTIME_MARKER),
-            QtCore.Qt.Key.Key_Y: lambda: self._mark(tune.PART_TUNED),
-            QtCore.Qt.Key.Key_Z: lambda: self._mark(tune.TUNED),
-            QtCore.Qt.Key.Key_X: self._axis_setup,
-            QtCore.Qt.Key.Key_M: self._quick_trim,
-            QtCore.Qt.Key.Key_K: self.toggle_graph,
-            QtCore.Qt.Key.Key_O: self._smooth_selection,
-        }
-        if control and key == QtCore.Qt.Key.Key_I:
-            self._interpolate_selection(True, True)
-            return True
-        if control and key == QtCore.Qt.Key.Key_F:
-            self._fill_right()
-            return True
-        if shift and key == QtCore.Qt.Key.Key_H:
-            self._interpolate_selection(False, True)
-            return True
-        if shift and key == QtCore.Qt.Key.Key_V:
-            self._interpolate_selection(True, False)
-            return True
-        if shift and key == QtCore.Qt.Key.Key_M:
-            self.window_.marks.clear_table(self.parameter.data_id)
-            self.refresh()
-            return True
-        if not control and not shift and key in letters:
-            letters[key]()
-            return True
-        if key in (QtCore.Qt.Key.Key_Plus, QtCore.Qt.Key.Key_Greater):
-            self._apply(lambda value: value + self._step())
-        elif key in (QtCore.Qt.Key.Key_Minus, QtCore.Qt.Key.Key_Less):
-            self._apply(lambda value: value - self._step())
-        elif key == QtCore.Qt.Key.Key_Equal:
-            number, chosen = QtWidgets.QInputDialog.getDouble(self, "Set cells", "Value:", 0, -1e9, 1e9, 3)
-            if chosen:
-                self._apply(lambda _value: number)
-        elif key == QtCore.Qt.Key.Key_Asterisk:
-            percent, chosen = QtWidgets.QInputDialog.getDouble(self, "Scale cells", "Percent:", 100, 0, 1000, 2)
-            if chosen:
-                self._apply(lambda value: value * percent / 100)
-        else:
-            return False
-        return True
-
-    def _copy(self) -> None:
-        cells = self.grid.selectedIndexes()
-        if not cells:
-            return
-        rows = sorted({cell.row() for cell in cells})
-        columns = sorted({cell.column() for cell in cells})
-        text = "\n".join(
-            "\t".join(self.grid.item(r, c).text() if self.grid.item(r, c) else "" for c in columns) for r in rows
-        )
-        QtWidgets.QApplication.clipboard().setText(text)
-
-    def _paste(self) -> None:
-        current = self.grid.currentIndex()
-        if not current.isValid():
-            return
-        try:
-            rows = [
-                [float(cell) for cell in line.split("\t")]
-                for line in QtWidgets.QApplication.clipboard().text().strip().splitlines()
-            ]
-        except ValueError:
-            self.window_.show_error("The clipboard does not hold a block of numbers.")
-            return
-        for r, values in enumerate(rows):
-            for c, value in enumerate(values):
-                row, column = current.row() + r, current.column() + c
-                if row < self.grid.rowCount() and column < self.grid.columnCount():
-                    self._write_display(value, row * self.grid.columnCount() + column)
-
-    def _edit_axis(self, axis_id: int | None, index: int) -> None:
-        ecu = self.window_.worker.ecu
-        if self.read_only or axis_id is None or ecu is None or axis_id not in ecu.table:
-            return
-        current = ecu.get(axis_id, index)
-        number, chosen = QtWidgets.QInputDialog.getDouble(self, "Axis breakpoint", "Value:", current, -1e9, 1e9, 3)
-        if chosen and number != current:
-            self.window_.write(axis_id, number, index)
-
-    def refresh(self) -> None:
-        ecu = self.window_.worker.ecu
-        if ecu is None:
-            return
-        kind = self._kind()
-        units = self.window_.units
-        values = [units.to_display(value, kind) for value in ecu.get_all(self.parameter.data_id)]
-        self.grid.blockSignals(True)
-        decimals = self.parameter.decimals
-        decimals = None if decimals is None else units.decimals(decimals, kind)
-        low, high = (min(values), max(values)) if values else (0.0, 0.0)
-        for index, value in enumerate(values):
-            row, column = divmod(index, self.grid.columnCount())
-            text = f"{value:.{decimals}f}" if decimals is not None else f"{value:g}"
-            cell = self.grid.item(row, column)
-            if cell is None:
-                cell = QtWidgets.QTableWidgetItem(text)
-                self.grid.setItem(row, column, cell)
-            elif cell.text() != text and not (self.grid.currentItem() is cell and self.grid.isPersistentEditorOpen(cell)):
-                cell.setText(text)
-            cell.setBackground(self.window_.cell_colour(self.parameter.data_id, row, column) or QtGui.QColor(*heat_colour(value, low, high)))
-            changed = ecu.is_changed(self.parameter.data_id, index)
-            cell.setForeground(self.window_.theme.colour("ValueChanged") if changed else QtGui.QColor(20, 20, 20))
-        for axis_id, size, setter in (
-            (self.parameter.column_axis_id, self.grid.columnCount(), self.grid.setHorizontalHeaderLabels),
-            (self.parameter.row_axis_id, self.grid.rowCount(), self.grid.setVerticalHeaderLabels),
-        ):
-            if axis_id in ecu.table:
-                breakpoints = ecu.get_all(axis_id)[:size]
-                setter([f"{value:g}" for value in breakpoints])
-                hide = self.grid.setColumnHidden if size == self.grid.columnCount() and setter == self.grid.setHorizontalHeaderLabels else self.grid.setRowHidden
-                for index in range(size):
-                    hide(index, index >= used_axis_length(breakpoints))
-        self.grid.blockSignals(False)
-        self.surface.set_values(values, self.grid.columnCount())
-        self.update_trace()
-
-    def update_trace(self) -> None:
-        """Outline the cell the engine is using now."""
-        position = self.window_.table_position(self.parameter, self.grid.rowCount(), self.grid.columnCount())
-        if position == self.trace:
-            return
-        # Changing a font fires itemChanged, which must never become an ECU write.
-        self.grid.blockSignals(True)
-        for spot, bold in ((self.trace, False), (position, True)):
-            if spot and self.grid.item(*spot):
-                font = self.grid.item(*spot).font()
-                font.setBold(bold)
-                font.setUnderline(bold)
-                self.grid.item(*spot).setFont(font)
-        self.grid.blockSignals(False)
-        self.trace = position
-        if position:
-            self.snake.add(position)
 
 
 class SettingsView(QtWidgets.QScrollArea):
@@ -872,6 +374,7 @@ class SettingsView(QtWidgets.QScrollArea):
         self.view = view
         self.form = ParameterForm(window)
         self.form.prefers_graph = view.attributes.get("GraphDisplay") == "true"
+        self.form.attributes = view.attributes
         self.filled = False
         self.setWidgetResizable(True)
         self.setWidget(self.form)
@@ -887,11 +390,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.options = options if options is not None else Options.load()
         self.worker = Worker(database)
         self.units = UnitSystem(self.options.unit_choice())
+        logfile.UNITS = self.units
         self.runtime_config = RuntimeConfig.load()
         self.setWindowTitle("OpenPCLink (unofficial)")
         self.resize(1200, 760)
         self.protected = False
         self._uri = ""
+        self.compare_state: security.CompareState | None = None
         self._map_path: Path | None = None
         self.status_window: StatusWindow | None = None
         self.options_path: Path | None = None
@@ -899,10 +404,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.marks = tune.CellMarks()
         self.snake_state = 0
         self.log_session = LogSession()
+        self._history: SampleHistory | None = None
+        self.log_session.open_zoom = int(self.options.log_settings.get("open_zoom", 0))
+        self._last_fault = ""
         self.log_session.describe = lambda data_id: self.describe(data_id)[0]
         self.log_session.colour_of = lambda data_id: self.theme.parameter_colour(self.runtime_config.get(data_id).colour) if data_id in self.runtime_config.entries else None
+        self.log_session.display = lambda series, value: self.units.to_display(value, series.unit_key or series.units)
+        self.log_session.span = lambda series, value: self.units.span_to_display(value, series.unit_key or series.units)
+        self.log_session.unit_label = lambda series: self.units.label(series.unit_key or series.units)
+        self.log_session.decimals = self._log_decimals
+        self.log_session.theme_colour = lambda name: self.theme.colour(name)
+        self.log_session.overlay_colour = lambda index: self.theme.overlay_colour(index)
+        self.log_session.parameter_colour = lambda index: self.theme.parameter_colour(index)
         self.current_table_id: int | None = None
-        self.quick_tune_window: tools.QuickTuneWindow | None = None
+        self.quick_tune_window: tuningtools.QuickTuneWindow | None = None
         self.runtime_window: Workspace | None = None
         self.help_window: QtWidgets.QTextBrowser | None = None
         self.windows: dict[str, QtWidgets.QWidget] = {}
@@ -932,7 +447,8 @@ class MainWindow(QtWidgets.QMainWindow):
         settings_layout.addWidget(self.search)
         settings_layout.addWidget(self.tree)
         self.left_tabs.addTab(settings_page, "ECU Settings")
-        self.left_tabs.addTab(self.runtime_tree, "Parameters")
+        self.runtime_panel = ParametersPanel(self, self.runtime_tree)
+        self.left_tabs.addTab(self.runtime_panel, "Parameters")
         self.log_manager = tools.LogFileManager(self)
         self.left_tabs.addTab(self.log_manager, "Log File Manager")
         self.event_log = tools.EventLogView()
@@ -946,6 +462,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.workspace = Workspace(self)
         self.log_workspace = Workspace(self)
+        for workspace in (self.workspace, self.log_workspace):
+            workspace.banner = QtWidgets.QLabel()
+            workspace.banner.setStyleSheet("color:#ff2020;font-size:13pt;padding:0 8px;background:transparent")
+            workspace.row.insertWidget(1, workspace.banner, 1)
+            workspace.row.setStretchFactor(workspace.tabs, 0)
         self.display_stack = QtWidgets.QStackedWidget()
         self.display_stack.addWidget(self.workspace)
         self.display_stack.addWidget(self.log_workspace)
@@ -961,17 +482,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.splitter.setSizes([280, 920])
         self.setCentralWidget(self.splitter)
 
-        self.status_label = QtWidgets.QLabel()
+        self.status_label = IndicatorLabel("", ("online", "map file"))
         self.unstored_label = QtWidgets.QLabel()
         self.fault_label = QtWidgets.QLabel()
-        self.fault_label.setStyleSheet("color:#a12626;font-weight:bold")
-        self.log_state_label = QtWidgets.QLabel("PC Log = Off")
-        self.rate_label = QtWidgets.QLabel()
+        self.log_state_label = IndicatorLabel("PC Log = Off", ("on",))
+        self.rate_label = IndicatorLabel("", show_state=False)
+        self.rate_meter = RateMeter()
+        self.indicators = Indicators(self.log_state_label, self.status_label, self.rate_label)
+        self.workspace.attach_indicators(self.indicators)
+        self.display_stack.currentChanged.connect(lambda _index: self.current_workspace().attach_indicators(self.indicators))
         self.statusBar().addPermanentWidget(self.fault_label)
         self.statusBar().addPermanentWidget(self.unstored_label)
-        self.statusBar().addPermanentWidget(self.log_state_label)
-        self.statusBar().addPermanentWidget(self.status_label)
-        self.statusBar().addPermanentWidget(self.rate_label)
         self._load_default_layouts()
         self.apply_appearance()
         self._build_actions()
@@ -979,6 +500,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.worker.connected.connect(self._on_connected)
         self.worker.disconnected.connect(self._on_disconnected)
+        self.worker.trapped.connect(self._on_trapped)
         self.worker.runtime.connect(self._on_runtime)
         self.worker.wrote.connect(self._on_wrote)
         self.worker.failed.connect(self.show_error)
@@ -1009,8 +531,10 @@ class MainWindow(QtWidgets.QMainWindow):
         return views[0] if views else self.fallback_help
 
     def _load_default_layouts(self) -> None:
+        self.workspace.path = Path(self.options.recent_layout) if self.options.recent_layout else None
+        self.log_workspace.path = Path(self.options.recent_logging_layout) if self.options.recent_logging_layout else None
         self.workspace.load(self._layout_named(self.options.recent_layout, "DefaultLayout", _fallback_layout))
-        self.log_workspace.load(self._layout_named("", "DefaultLoggingLayout", _fallback_log_layout))
+        self.log_workspace.load(self._layout_named(self.options.recent_logging_layout, "DefaultLoggingLayout", _fallback_log_layout))
 
     def _layout_named(self, recent: str, name: str, fallback) -> Layout:
         for path in (Path(recent) if recent else None, assets.layout_path(name)):
@@ -1092,29 +616,59 @@ class MainWindow(QtWidgets.QMainWindow):
         if view.type == "Vehicle Plan":
             return VehiclePlan(self.log_session, view, self._live_value)
         kind = LOG_VIEW_TYPES.get(view.type)
-        return kind(self.log_session, view) if kind else None
+        body = kind(self.log_session, view) if kind else None
+        if body is not None:
+            body.changed_hook = self.layout_changed
+        return body
+
+    def _log_decimals(self, series) -> int | None:
+        if not series.data_id or not self.database.known(series.data_id):
+            return None
+        decimals = self.database.parameter(series.data_id).decimals or 0
+        return self.units.decimals(decimals, series.unit_key or series.units)
 
     def _live_value(self, data_id: int) -> float | None:
         reading = self.reading(data_id)
         return reading.value if reading else None
 
     def view_context_menu(self, frame: ViewFrame, menu: QtWidgets.QMenu) -> None:
-        if isinstance(frame.body, LiveView):
-            menu.addAction("Choose Parameters…", lambda: self.choose_live_parameters(frame))
-            if isinstance(frame.body.body, Gauge):
-                menu.addAction("Properties…", lambda: self.gauge_properties(frame))
-        elif hasattr(frame.body, "set_parameters"):
+        if not isinstance(frame.body, LiveView) and hasattr(frame.body, "set_parameters"):
             menu.addAction("Choose Parameters…", lambda: self.choose_log_parameters(frame))
+            if hasattr(frame.body, "populate_menu"):
+                frame.body.populate_menu(menu)
+
+    def view_properties(self, frame: ViewFrame) -> None:
+        if isinstance(frame.body, LiveView):
+            self.live_view_properties(frame)
+        elif hasattr(frame.body, "properties_dialog"):
+            frame.body.properties_dialog(self)
+
+    def caption_of_page(self, page: LayoutPage) -> str:
+        if page.name_string and page.name_string != "0":
+            return self.database.translate(page.name_string) or ""
+        return ""
 
     def current_table(self) -> int | None:
         return self.current_table_id
 
-    def layout_changed(self) -> None:
-        if self.options.auto_save_layout and self.options.recent_layout:
+    def layout_changed(self, workspace: Workspace | None = None) -> None:
+        """Auto-save: each workspace keeps its own layout file, the ECU one and the Log Analysis one."""
+        if not self.options.auto_save_layout:
+            return
+        targets = [workspace] if workspace is not None else [self.workspace, self.log_workspace]
+        for target in targets:
+            path = self.layout_path_of(target)
             try:
-                self.workspace.layout_.save(Path(self.options.recent_layout))
+                path.parent.mkdir(parents=True, exist_ok=True)
+                target.layout_.save(path)
             except OSError as exc:
                 self.statusBar().showMessage(f"Could not save layout: {exc}")
+
+    def layout_path_of(self, workspace: Workspace) -> Path:
+        if workspace.path is None:
+            name = "RuntimeViewLayout" if workspace is self.runtime_window else "DefaultLoggingLayout.llf5" if workspace is self.log_workspace else "DefaultLayout.llf5"
+            workspace.path = (self.options_path or default_options_path()).parent / "Layouts" / name
+        return workspace.path
 
     def _page_changed(self) -> None:
         self._fill_settings_views()
@@ -1124,8 +678,18 @@ class MainWindow(QtWidgets.QMainWindow):
     def apply_appearance(self) -> None:
         self.theme = theme = theme_named(self.options)
         sheet = theme.style_sheet()
+        view_size = 0
+        if self.options.view_font:
+            view_font = QtGui.QFont()
+            view_font.fromString(self.options.view_font)
+            view_size = view_font.pointSize()
+        if view_size > 0:
+            sheet += f"PageWidget QHeaderView::section {{ font-size:{max(view_size - 2, 4)}pt; }}"
         gauges.PARAMETER_COLOURS[:] = [theme.parameter_colour(i) for i in range(len(theme.parameters))]
-        gauges.set_theme(theme.colour("DataAreaBackground"), theme.colour("ViewText"), theme.colour("View Title Bar"))
+        gauges.set_theme(
+            theme.colour("DataAreaBackground"), theme.colour("ViewText"), theme.colour("View Title Bar"), theme.colour("Active Control"),
+            theme.colour("OK"), theme.colour("WarningLow"), theme.colour("WarningHigh"), theme.colour("Cursors"),
+        )
         for workspace in (self.workspace, self.log_workspace, self.runtime_window):
             if workspace is not None:
                 workspace.setStyleSheet(sheet)
@@ -1157,6 +721,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 return default
 
         self.units = UnitSystem(self.options.unit_choice(), setting(tune.STOICH_RATIO, 14.7), setting(tune.FUEL_EQUATION_MODE, 0) == 2.0)
+        logfile.UNITS = self.units
+        session = getattr(self, "log_session", None)
+        if session:
+            for log in session.logs:
+                log.rebuild()
+            session.changed.emit()
 
     def kind_of(self, parameter: Parameter) -> str:
         return parameter.value_type or parameter.units
@@ -1239,14 +809,18 @@ class MainWindow(QtWidgets.QMainWindow):
         item(options, "Directories", lambda: self.show_options("Directories"))
         item(options, "Colour Theme", self.colour_theme)
         units = options.addMenu("Units")
-        item(units, "Metric", lambda: self.set_unit_system("Metric"))
-        item(units, "Imperial", lambda: self.set_unit_system("Imperial"))
+        self.unit_actions = {name: item(units, name, lambda name=name: self.set_unit_system(name)) for name in ("Metric", "Imperial")}
+        group = QtGui.QActionGroup(self)
+        for name, action in self.unit_actions.items():
+            action.setCheckable(True)
+            action.setChecked(self.options.system == name)
+            group.addAction(action)
         item(units, "Options", lambda: self.show_options("Units"))
         language = options.addMenu("Language")
         english = QtGui.QAction(self.options.language, self, checkable=True, checked=True)
         language.addAction(english)
         options.addSeparator()
-        item(options, "Setup ECU Parameters", lambda: self.left_tabs.setCurrentWidget(self.runtime_tree), "Ctrl+E")
+        item(options, "Setup ECU Parameters", lambda: self.left_tabs.setCurrentWidget(self.runtime_panel), "Ctrl+E")
 
         ecu_menu = menus.addMenu("ECU Controls")
         self.connect_action = item(ecu_menu, "Connect", self.toggle_connection, "F3")
@@ -1288,7 +862,7 @@ class MainWindow(QtWidgets.QMainWindow):
         display.addSeparator()
         item(display, "Full Screen with Menus (Ctrl + F4)", lambda: self.set_full_screen(1))
         item(display, "Full Screen (Ctrl + F4)", lambda: self.set_full_screen(2))
-        QtGui.QShortcut("Ctrl+F4", self, activated=lambda: self.set_full_screen(0 if self.isFullScreen() else 2))
+        QtGui.QShortcut("Ctrl+F4", self, activated=lambda: self.set_full_screen(0 if self.isFullScreen() else getattr(self, "saved_full_screen", 2)))
 
         self.layout_menu = menus.addMenu("Layout")
         self.layout_menu.aboutToShow.connect(self._fill_layout_menu)
@@ -1296,7 +870,7 @@ class MainWindow(QtWidgets.QMainWindow):
         view = menus.addMenu("View")
         item(view, "ECU Settings", lambda: self.left_tabs.setCurrentIndex(0))
         item(view, "Log File Manager", lambda: self.left_tabs.setCurrentWidget(self.log_manager))
-        item(view, "Parameters", lambda: self.left_tabs.setCurrentWidget(self.runtime_tree))
+        item(view, "Parameters", lambda: self.left_tabs.setCurrentWidget(self.runtime_panel))
         item(view, "Event Log", lambda: self.left_tabs.setCurrentWidget(self.event_log))
         view.addSeparator()
         item(view, "Digital Gauge", lambda: self.add_live_view("Digital Gauge"), "Ctrl+F5")
@@ -1344,13 +918,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         help_menu = menus.addMenu("Help")
         item(help_menu, "Contents", lambda: self.show_topic("welcome"))
-        item(help_menu, "Help for Selection", self.show_help, "F1")
+        self.addAction(QtGui.QAction("Help for Selection", self, shortcut="F1", triggered=lambda _checked=False: self.show_help()))
         item(help_menu, "Keyboard shortcuts", lambda: self.show_topic("keyboard_shortcuts"))
         item(help_menu, "Wiring Information", lambda: self.show_topic("wiring_information"))
         item(help_menu, "ECU Fault Codes", lambda: self.show_topic("ecu_fault_codes"))
         help_menu.addSeparator()
         item(help_menu, "ECU Information", self.ecu_information)
-        item(help_menu, "About…", self.about)
+        help_menu.addSeparator()
+        item(help_menu, "About...", self.about)
 
         toolbar = self.addToolBar("ECU")
         toolbar.setMovable(False)
@@ -1358,37 +933,34 @@ class MainWindow(QtWidgets.QMainWindow):
         toolbar.addAction(self.store_action)
         self._apply_lock_state()
 
-    # Allowed on a locked ECU, as in PCLink's menu handling.
     def _apply_lock_state(self) -> None:
+        """A locked ECU keeps only the menu items PCLink leaves it; see security.LOCKED_MENUS."""
         locked = self.protected
         for action in (self.feature_action, self.firmware_action):
             action.setEnabled(not locked)
         self.setup_password_action.setEnabled(not locked)
         self.unlock_password_action.setEnabled(locked)
+        security.apply_lock_menus(self.menuBar(), locked)
 
     def _fill_layout_menu(self) -> None:
         menu = self.layout_menu
         menu.clear()
         menu.addAction("New Layout", self.new_layout)
         menu.addAction("Load Layout", self.load_layout)
-        menu.addAction("Save Layout As…", self.save_layout)
+        menu.addAction("Save Layout As...", self.save_layout)
         menu.addSeparator()
         menu.addAction("New Page", self.new_page)
         menu.addAction("Delete Page", self.delete_page)
         menu.addAction("Rename Page", self.rename_page)
         menu.addSeparator()
-        for page in self.current_workspace().layout_.pages:
-            menu.addAction(page.name, lambda name=page.name: self.current_workspace().show_page(name))
+        workspace = self.current_workspace()
+        for page in workspace.layout_.pages:
+            menu.addAction(workspace._page_title(page), lambda name=page.name: self.current_workspace().show_page(name))
 
     def current_workspace(self) -> Workspace:
         return self.display_stack.currentWidget()
 
     # ---- files and options ------------------------------------------------
-
-    def compare_close(self) -> None:
-        if getattr(self, "compare_dialog", None) is not None:
-            self.compare_dialog.close()
-        self.compare_action_close.setEnabled(False)
 
     def show_memo(self) -> None:
         ecu = self.worker.ecu
@@ -1424,11 +996,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def set_unit_system(self, name: str) -> None:
         self.options.system = name
+        if name in getattr(self, "unit_actions", {}):
+            self.unit_actions[name].setChecked(True)
         self.options_changed()
         self.statusBar().showMessage(f"{name} units", 3000)
 
     def set_full_screen(self, mode: int) -> None:
         """0 normal, 1 full screen with menus, 2 full screen without menus or the side panel."""
+        if mode:
+            self.saved_full_screen = mode
         self.menuBar().setVisible(mode != 2)
         self.left_tabs.setVisible(mode != 2)
         self.showFullScreen() if mode else self.showNormal()
@@ -1439,11 +1015,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self.show_error("ECU information is not available.")
             return
         info = ecu.info
-        enabled = "Enabled"
+        ecu_type = ""
+        if scope.ECU_TYPE_ID in ecu.table and self.database.known(scope.ECU_TYPE_ID):
+            options = self.database.parameter(scope.ECU_TYPE_ID).options
+            index = int(ecu.get(scope.ECU_TYPE_ID))
+            ecu_type = options[index].strip() if 0 <= index < len(options) else ""
         lines = [
             f"MainCode Firmware Version: {info.firmware}", f"BootCode Firmware Version: {info.boot}",
-            f"ECU Serial Number: {info.serial}", f"LinkID: {info.link_id}", f"ECU Enabled: {enabled}",
+            "Main Board Revision: 0.0", f"ECU Serial Number: {info.serial}",
         ]
+        if ecu_type:
+            lines.append(f"ECU Type: {ecu_type}")
+        lines += [f"LinkID: {info.link_id}", "ECUMinSpec: 0.0", "ECU Enabled: Enabled"]
         QtWidgets.QMessageBox.information(self, "ECU Information", "\n".join(lines))
 
     def about(self) -> None:
@@ -1455,31 +1038,51 @@ class MainWindow(QtWidgets.QMainWindow):
     # ---- layouts ----------------------------------------------------------
 
     def new_layout(self) -> None:
-        self.current_workspace().load(Layout([LayoutPage("Page 1")], "Page 1"))
+        workspace = self.current_workspace()
+        self.layout_changed(workspace)
+        workspace.load(Layout([LayoutPage("Page 1")], "Page 1", workspace.layout_.root_type))
+        self.layout_changed(workspace)
 
     def load_layout(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Load Layout", self.options.folder("layout"), "Layout Files (*.llf5 *.llfx)")
         if path:
+            self.options.remember("layout", path[0] if isinstance(path, list) else path)
+        if path:
             self.load_layout_file(Path(path))
 
     def load_layout_file(self, path: Path) -> None:
+        workspace = self.current_workspace()
         try:
-            self.current_workspace().load(Layout.load(path))
+            layout = Layout.load(path)
         except LayoutError as exc:
             self.show_error(f"Could not load layout: {exc}")
             return
-        if self.current_workspace() is self.workspace:
+        self.layout_changed(workspace)
+        workspace.load(layout)
+        workspace.path = Path(path)
+        self._remember_layout(workspace, path)
+        if workspace.unsupported:
+            self.statusBar().showMessage("Views not supported here: " + ", ".join(sorted(set(workspace.unsupported))), 8000)
+
+    def _remember_layout(self, workspace: Workspace, path: Path | str) -> None:
+        if workspace is self.workspace:
             self.options.recent_layout = str(path)
-            self.options.save(self.options_path)
+        elif workspace is self.log_workspace:
+            self.options.recent_logging_layout = str(path)
+        else:
+            return
+        self.options.save(self.options_path)
 
     def save_layout(self) -> None:
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Layout As", self.options.folder("layout"), "Layout Files (*.llf5)")
         if path:
+            self.options.remember("layout", path[0] if isinstance(path, list) else path)
+        if path:
             target = Path(path).with_suffix(".llf5")
-            self.current_workspace().layout_.save(target)
-            if self.current_workspace() is self.workspace:
-                self.options.recent_layout = str(target)
-                self.options.save(self.options_path)
+            workspace = self.current_workspace()
+            workspace.layout_.save(target)
+            workspace.path = target
+            self._remember_layout(workspace, target)
 
     def new_page(self) -> None:
         name, chosen = QtWidgets.QInputDialog.getText(self, "New Page", "Name:")
@@ -1490,7 +1093,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_workspace().delete_page()
 
     def rename_page(self) -> None:
-        name, chosen = QtWidgets.QInputDialog.getText(self, "Rename Page", "Name:")
+        workspace = self.current_workspace()
+        index = workspace.tabs.currentIndex()
+        current = workspace.tabs.tabText(index) if index >= 0 else ""
+        name, chosen = QtWidgets.QInputDialog.getText(self, "Rename Page", "Name:", text=current)
         if chosen and name:
             self.current_workspace().rename_page(name)
 
@@ -1533,17 +1139,32 @@ class MainWindow(QtWidgets.QMainWindow):
             frame.body.set_parameters(dialog.ids())
             self.layout_changed()
 
-    def gauge_properties(self, frame: ViewFrame) -> None:
-        settings = frame.body.body.settings
-        if tools.GaugePropertiesDialog(settings, self).exec():
-            frame.view.attributes.update(settings.attributes())
-            frame.body.body.update()
-            self.layout_changed()
+    def live_view_properties(self, frame: ViewFrame) -> None:
+        tables = [
+            (data_id, self.database.parameter(data_id).caption) for data_id in (self.worker.ecu.table if self.worker.ecu else [])
+            if self.database.known(data_id) and self.database.parameter(data_id).is_table
+        ]
+        dialog = viewdialogs.ViewPropertiesDialog(frame.view, self.live_choices(), tables, self)
+        if dialog.exec():
+            dialog.apply()
+            frame.body.rebuild()
+            frame.set_caption(self.caption_of_view(frame.view))
+            frame.body.refresh()
+            self.layout_changed(frame.owner())
 
     def show_runtime_values(self) -> None:
         if self.runtime_window is None:
-            layout = tools.load_runtime_layout("RuntimeViewLayout")
+            saved = (self.options_path or default_options_path()).parent / "Layouts" / "RuntimeViewLayout"
+            layout = None
+            if saved.exists():
+                try:
+                    layout = Layout.load(saved)
+                except LayoutError:
+                    layout = None
+            layout = layout or tools.load_runtime_layout("RuntimeViewLayout")
             self.runtime_window = Workspace(self)
+            self.runtime_window.path = saved
+            self.runtime_window.page_changed.connect(self.runtime_window.refresh_live)
             self.runtime_window.setWindowTitle("Runtime Values")
             self.runtime_window.resize(900, 620)
             self.runtime_window.setStyleSheet(self.theme.style_sheet())
@@ -1565,11 +1186,31 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.worker.ecu:
             self._confirm_disconnect()
             return
-        ports = list_ports()
-        if ports:
-            self.connect_to(ports[0].uri)
+        if self.options.connection_manual and self.options.connection_port == "Network":
+            self._search_wifi()
+            return
+        uri = self.options.connection_uri(list_ports())
+        if uri:
+            self.connect_to(uri)
         else:
             self.show_error("No ECU found. Power it on and connect its USB cable.")
+
+    def _search_wifi(self) -> None:
+        """One ECU answering connects to it; several, or none, open the selection form."""
+        found = discover_wifi()
+        if len(found) != 1:
+            dialog = WifiSelectionDialog(self)
+            if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted or not dialog.chosen():
+                return
+            self.connect_to(dialog.chosen())
+            return
+        self.connect_to(f"udp:{found[0][0]}")
+
+    def connect_on_startup(self) -> None:
+        if self.worker.ecu is None:
+            uri = self.options.connection_uri(list_ports())
+            if uri:
+                self.connect_to(uri)
 
     def update_statistics(self) -> None:
         if self._live_ecu():
@@ -1588,11 +1229,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show_error("Connect to an ECU or open a map first.")
 
     def calibrate_baro(self) -> None:
-        if not self._live_ecu():
+        if not self._live_ecu("ECU must be connected."):
             return
-        value, chosen = QtWidgets.QInputDialog.getDouble(self, "Enter New Value", "Barometric pressure (kPa) equals", 101.0, -10000, 10000, 1)
+        value, chosen = QtWidgets.QInputDialog.getDouble(self, "Enter New Value", "Equals", 101.0, -10000, 10000, 1)
         if chosen:
-            self.worker.post("control", lambda ecu: ecu.calibrate_baro(value), "Baro sensor calibrated.")
+            self.call(lambda ecu: self._failing_with("Baro Calibration command failed", ecu.calibrate_baro, value), lambda _r: QtWidgets.QMessageBox.information(self, "Baro Calibration", "Baro Calibration command completed successfully."))
+
+    @staticmethod
+    def _failing_with(text: str, action, *args) -> None:
+        try:
+            action(*args)
+        except EcuError as exc:
+            raise EcuError(f"{text}\n{exc}") from exc
 
     def _engine_stopped(self, message: str) -> bool:
         reading = self.reading(ENGINE_SPEED_ID)
@@ -1602,15 +1250,15 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def calibrate_throttle(self, throttle: int) -> None:
-        if not self._live_ecu():
+        if not self._live_ecu("ECU must be connected."):
             return
         if not self._engine_stopped("TPS can not be calibrated while the engine is running."):
             return
         spec = tools.THROTTLE[throttle]
         ecu = self.worker.ecu
-        mode = ecu.get(spec["mode"]) if spec["mode"] in ecu.table else None
+        mode = int(ecu.get(spec["mode"])) if spec["mode"] in ecu.table else 0
         if mode == 0 and throttle == 0:
-            self.tps_setup()
+            self._tps_span()
             return
         if mode != tools.ETHROTTLE_SETUP_MODE:
             self.show_error("Ethrottle TPS can only be Calibrated in Setup Mode.")
@@ -1625,7 +1273,7 @@ class MainWindow(QtWidgets.QMainWindow):
             tools.ThrottleCalibration(self, throttle).exec()
 
     def calibrate_pedal(self) -> None:
-        if not self._live_ecu() or not self._engine_stopped("APS can not be calibrated while the engine is running."):
+        if not self._live_ecu("ECU must be connected.") or not self._engine_stopped("APS can not be calibrated while the engine is running."):
             return
         buttons = QtWidgets.QMessageBox.StandardButton
         answer = QtWidgets.QMessageBox.warning(
@@ -1657,13 +1305,20 @@ class MainWindow(QtWidgets.QMainWindow):
         if not isinstance(self.worker.ecu, Ecu):
             self.show_error("ECU must be connected to unlock functions.")
             return
-        dialog = tools.FeatureUnlockDialog(self.worker.ecu.info.serial, self)
-        if dialog.exec():
-            code = dialog.code.text()
-            self.call(lambda ecu: ecu.feature_unlock(code), self._feature_unlocked)
+        ecu = self.worker.ecu
+        features = []
+        for data_id in (FEATURE_ENABLE_ID,):
+            if data_id in ecu.table and self.database.known(data_id):
+                features.append((self.database.parameter(data_id).caption, bool(ecu.get(data_id))))
+        dialog = security.EcuUnlockDialog(ecu.info.serial, features, self)
+        dialog.unlock_requested.connect(lambda code: self.call(lambda live: live.feature_unlock(code), lambda _r: self._feature_unlocked(dialog)))
+        dialog.exec()
 
-    def _feature_unlocked(self, _result) -> None:
-        QtWidgets.QMessageBox.information(self, "ECU Unlock", "Unlock code accepted.\n\nPerform a Store. The ECU's power may need cycling.")
+    def _feature_unlocked(self, dialog) -> None:
+        """The ECU took the code. PCLink closes the box, then reconnects."""
+        self.statusBar().showMessage("Unlock code accepted.", 6000)
+        self.event_log.add("Unlock code accepted.")
+        dialog.accept()
         self.connect_to(self._uri)
 
     def restore_factory(self) -> None:
@@ -1719,24 +1374,28 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def update_firmware(self) -> None:
         ecu = self.worker.ecu
-        if isinstance(ecu, Ecu):
-            uri, info = self._uri, ecu.info
-            current = tuple(int(part) for part in info.firmware.split(".")[:3])
-            product = info.hardware_family
+        reconnect = isinstance(ecu, Ecu)
+        if reconnect:
+            uri = self._uri
         else:
             dialog = ConnectDialog(self)
             if not dialog.exec() or not dialog.uri():
                 return
-            uri, current, product = dialog.uri(), None, 0
-        if uri.startswith("udp:"):
+            uri = dialog.uri()
+        if uri.startswith("udp:") or "network" in uri.lower():
             self.show_error("Can't update Firmware over Wifi")
             return
-        reconnect = isinstance(ecu, Ecu)
         if ecu is not None:
             self.worker.post("disconnect")
-        if tools.FirmwareDialog(self, uri, current, product).exec() or reconnect:
-            if reconnect:
-                self.connect_to(uri)
+            deadline = time.monotonic() + 5
+            while self.worker.ecu is not None and time.monotonic() < deadline:
+                QtWidgets.QApplication.processEvents()
+                time.sleep(0.02)
+        firmware_dialog = tools.FirmwareDialog(self, uri)
+        if firmware_dialog.ready:
+            firmware_dialog.exec()
+        if reconnect:
+            self.connect_to(uri)
 
     # ---- tuning -----------------------------------------------------------
 
@@ -1745,7 +1404,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "Information", "Quick tune function only available when ECU is online.")
             return
         if self.quick_tune_window is None:
-            self.quick_tune_window = tools.QuickTuneWindow(self)
+            self.quick_tune_window = tuningtools.QuickTuneWindow(self)
         if self.quick_tune_window.isVisible() and self.quick_tune_window.engine.mode != tune.OFF:
             self.quick_tune_window.tune_button.click()
             return
@@ -1766,17 +1425,30 @@ class MainWindow(QtWidgets.QMainWindow):
             self.mixture_setup(views[0])
 
     def mixture_setup(self, view: MixtureMapView) -> None:
-        names = [(data_id, self.describe(data_id)[0]) for data_id in (tune.FUEL_TABLE_1, tune.FUEL_TABLE_2) if self.database.known(data_id)]
+        ecu = self.worker.ecu
+        dual = ecu is not None and tune.DUAL_FUEL_MODE in ecu.table and ecu.get(tune.DUAL_FUEL_MODE) != 0
+        names = [(data_id, self.describe(data_id)[0]) for data_id in (tune.FUEL_TABLE_1, tune.FUEL_TABLE_2) if self.database.known(data_id) and (dual or data_id == tune.FUEL_TABLE_1)]
         log = self.log_session.log
         choices = [(series.data_id, series.name) for series in log.series if series.data_id] if log else self.live_choices()
-        if tools.MixtureSetupDialog(view.settings, names, sorted(choices, key=lambda pair: pair[1]), self).exec():
+        units = tuningtools.unit_system(self)
+        dialog = tuningtools.MixtureSetupDialog(view.settings, names, sorted(choices, key=lambda pair: pair[1]), self, units.label("Lambda"), self.mixture_scale())
+        if dialog.exec():
             view.view.attributes.update(view.settings.attributes())
             view.rebuild()
             self.layout_changed()
 
-    def build_mixture(self, settings: tune.MixtureSettings, log) -> tuple[list, str]:
+    def mixture_table_name(self, table_id: int) -> str:
+        return self.describe(table_id)[0] if self.database.known(table_id) else "Fuel Table"
+
+    def mixture_scale(self) -> float:
+        units = tuningtools.unit_system(self)
+        return units.stoich if units.label("Lambda") == "AFR" else 1.0
+
+    def build_mixture(self, settings: tune.MixtureSettings, log, progress=None) -> tuple[list, str]:
         ecu = self.worker.ecu
-        if ecu is None or settings.table not in ecu.table or not self.database.known(settings.table):
+        if ecu is None:
+            return [], "Can not find ECU info, load a configuration file or connect to an ECU."
+        if settings.table not in ecu.table or not self.database.known(settings.table):
             return [], "Fuel table parameter missing."
         parameter = self.database.parameter(settings.table)
         xs = used_axis(ecu, parameter.column_axis_id)
@@ -1790,7 +1462,7 @@ class MainWindow(QtWidgets.QMainWindow):
             values = [raw[r * columns + c] for r in range(max(len(t_ys), 1)) for c in range(len(t_xs))]
             target = lambda x, y: tune.bilinear(t_xs, t_ys, values, x, y)  # noqa: E731
         try:
-            return tune.build_mixture_map(log, settings, xs, ys, target), ""
+            return tune.build_mixture_map(log, settings, xs, ys, target, progress), ""
         except tune.MixtureError as exc:
             return [], str(exc)
 
@@ -1804,7 +1476,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.marks.set_flag(table_id, row, column, tune.PART_TUNED)
 
     def knock_audio(self) -> None:
-        self.windows.setdefault("knock", tools.KnockAudioWindow())
+        if "knock" not in self.windows:
+            audio = tuningtools.KnockAudioWindow()
+            if not audio.properties():
+                return
+            self.windows["knock"] = audio
         self.windows["knock"].show()
         self.windows["knock"].raise_()
 
@@ -1849,7 +1525,7 @@ class MainWindow(QtWidgets.QMainWindow):
         elif key == QtCore.Qt.Key.Key_E:
             self.left_tabs.setCurrentWidget(self.event_log)
         elif key == QtCore.Qt.Key.Key_P:
-            self.left_tabs.setCurrentWidget(self.runtime_tree)
+            self.left_tabs.setCurrentWidget(self.runtime_panel)
         elif key == QtCore.Qt.Key.Key_S or key == QtCore.Qt.Key.Key_Escape:
             self.left_tabs.setCurrentIndex(0)
         elif key == QtCore.Qt.Key.Key_U:
@@ -1891,6 +1567,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.worker.ecu:
             self._confirm_disconnect()
             return
+        if self.options.connection_manual and self.options.connection_port not in ("", "Auto"):
+            self.search_for_ecu()
+            return
         dialog = ConnectDialog(self)
         if dialog.exec() and dialog.uri():
             self.connect_to(dialog.uri())
@@ -1898,7 +1577,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def connect_to(self, uri: str) -> None:
         self._uri = uri
         self.statusBar().showMessage(f"Connecting to {uri}…")
-        self.worker.post("connect", uri)
+        self.worker.post("connect", uri, self.options.slow_connection)
 
     def _confirm_disconnect(self) -> None:
         if self.worker.ecu.has_unstored_changes:
@@ -1917,6 +1596,10 @@ class MainWindow(QtWidgets.QMainWindow):
             f"background:{'#1b7f3b' if online else '#a12626'};color:white;padding:2px 8px;font-weight:bold"
         )
         self.connect_action.setText("Disconnect" if online else "Connect")
+        if not online:
+            self._last_fault = ""
+            for workspace in (self.workspace, self.log_workspace):
+                workspace.banner.clear()
         self.store_action.setEnabled(online and not self.protected and not offline_map)
         self.centre.setCurrentIndex(1 if not self.protected else 0)
 
@@ -1944,8 +1627,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fill_settings_views()
         self.workspace.refresh_live()
 
+    def _on_trapped(self, report: str) -> None:
+        box = QtWidgets.QMessageBox(
+            QtWidgets.QMessageBox.Icon.Critical, "ECU Error",
+            "Error: ECU has had an exception and cannot connect.\nDo you wish to view debug information?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No, self,
+        )
+        if box.exec() == QtWidgets.QMessageBox.StandardButton.Yes and report:
+            tools.TextDialog("Trap Information", report, self).exec()
+
     def _on_disconnected(self, reason: str) -> None:
         self.protected = False
+        self.compare_state = None
+        self.compare_action_close.setEnabled(False)
         self._set_online(False)
         self.placeholder.setText("Press F3 to connect to an ECU.")
         self.tree.clear()
@@ -2007,6 +1701,10 @@ class MainWindow(QtWidgets.QMainWindow):
             path = self.menu_path(data_id)
             if path and (live or statistics or not parameter.is_runtime_value):
                 groups[path].append(data_id)
+        if not live:
+            for data_id in self.ACTION_PARAMETERS:
+                if data_id not in ecu.table and self.database.known(data_id) and self.menu_path(data_id):
+                    groups[self.menu_path(data_id)].append(data_id)
         return {
             path: ids for path, ids in groups.items() if any(self.parameter_visible(i) for i in ids)
         }
@@ -2030,14 +1728,14 @@ class MainWindow(QtWidgets.QMainWindow):
         def index(item: QtWidgets.QTreeWidgetItem, path: tuple[str, ...]) -> None:
             nodes[path] = item
             for child in range(item.childCount()):
-                index(item.child(child), path + (item.child(child).text(0),))
+                index(item.child(child), path + (_node_name(item.child(child)),))
 
         for top in range(self.tree.topLevelItemCount()):
             item = self.tree.topLevelItem(top)
-            index(item, (item.text(0),))
+            index(item, (_node_name(item),))
         ecu = self.worker.ecu
         for path, ids in groups.items():
-            tables = [i for i in ids if ecu.table[i].count > 1 and not ecu.table[i].is_bitfield and self.database.parameter(i).is_table]
+            tables = [i for i in ids if i in ecu.table and ecu.table[i].count > 1 and not ecu.table[i].is_bitfield and self.database.parameter(i).is_table]
             for data_id in sorted(tables, key=lambda i: -self.database.parameter(i).priority):
                 if self.parameter_visible(data_id):
                     entry = QtWidgets.QTreeWidgetItem(nodes[path], [self.database.parameter(data_id).caption])
@@ -2053,6 +1751,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._fill_tree(self.tree, groups, sort_key)
         self._add_table_entries(groups)
+        self._label_signal_strength()
+
+    def _label_signal_strength(self) -> None:
+        """PCLink titles the WiFi entry with the live signal strength, as "WiFi - 0"."""
+        ecu = self.worker.ecu
+        if SIGNAL_STRENGTH_ID not in getattr(ecu, "table", ()):
+            return
+        path = self.menu_path(SIGNAL_STRENGTH_ID)
+        item = None
+        for name in path:
+            siblings = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())] if item is None else [item.child(i) for i in range(item.childCount())]
+            item = next((entry for entry in siblings if _node_name(entry) == name), None)
+            if item is None:
+                return
+        item.setData(0, NAME_ROLE, path[-1])
+        item.setText(0, f"{path[-1]} - {int(ecu.get(SIGNAL_STRENGTH_ID))}")
 
     def _build_runtime_tree(self) -> None:
         tree = self.runtime_tree
@@ -2159,19 +1873,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.workspace.refresh_live()
 
     def _show_fault(self, ecu) -> None:
-        if StatusWindow.FAULT_CODE_ID not in ecu.table or not ecu.get(StatusWindow.FAULT_CODE_ID):
-            self.fault_label.clear()
-            return
-        parameter = self.database.parameter(StatusWindow.FAULT_CODE_ID)
-        text = self._format_live(parameter, ecu.get(StatusWindow.FAULT_CODE_ID), 0, "")
-        if text != self.fault_label.text():
-            self.event_log.add(f"ECU Fault Code: {text}", True)
-        self.fault_label.setText(text)
+        code = int(ecu.get(StatusWindow.FAULT_CODE_ID)) if StatusWindow.FAULT_CODE_ID in ecu.table else 0
+        text = faults.fault_text(self.database, code)
+        for workspace in (self.workspace, self.log_workspace):
+            workspace.banner.setText(text)
+        if text and text != self._last_fault:
+            self.event_log.add(text, True)
+        self._last_fault = text
 
-    def _live_ecu(self) -> bool:
+    def _live_ecu(self, message: str = "Connect to an ECU first.") -> bool:
         if isinstance(self.worker.ecu, Ecu):
             return True
-        self.show_error("Connect to an ECU first.")
+        if message:
+            self.show_error(message)
         return False
 
     def _confirm(self, title: str, message: str) -> bool:
@@ -2187,21 +1901,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self.worker.post("control", Ecu.clear_statistics, "Statistics cleared.")
 
     def calibrate_map(self) -> None:
-        if self._live_ecu() and self._confirm("MAP Sensor Calibration", "Do you want to perform a MAP Sensor Calibration? Key on, engine stopped."):
-            self.worker.post("control", Ecu.calibrate_map, "MAP sensor calibrated. Check MAP matches BAP, then Store.")
+        if self._live_ecu("") and self._confirm("MAP Sensor Calibration", "Do you want to perform a MAP Sensor Calibration"):
+            self.call(lambda ecu: self._failing_with("MAP Sensor Calibration  command failed", ecu.calibrate_map), lambda _r: QtWidgets.QMessageBox.information(self, "MAP Sensor Calibration", "MAP Sensor Calibration command completed successfully."))
 
     def tps_setup(self) -> None:
-        if not self._live_ecu():
-            return
+        self.calibrate_throttle(0)
+
+    def _tps_span(self) -> None:
         buttons = QtWidgets.QMessageBox.StandardButton
         choice = QtWidgets.QMessageBox.information(
             self, "TPS Span Adjustment", "Depress THROTTLE to fully OPEN position.", buttons.Ok | buttons.Cancel
         )
         if choice != buttons.Ok:
             return
-        self.worker.post("control", lambda ecu: ecu.set_tps_span(TPS_OPEN_ID), "TPS open point saved.")
+        self.worker.post("control", lambda ecu: ecu.set_tps_span(TPS_OPEN_ID), "")
         QtWidgets.QMessageBox.information(self, "TPS Span Adjustment", "Release THROTTLE to CLOSED position.")
-        self.worker.post("control", lambda ecu: ecu.set_tps_span(TPS_CLOSED_ID), "TPS closed point saved. Store to keep it.")
+        self.worker.post("control", lambda ecu: ecu.set_tps_span(TPS_CLOSED_ID), "")
 
     def _on_controlled(self, message: str) -> None:
         self.statusBar().showMessage(message, 6000)
@@ -2223,7 +1938,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status_window.refresh()
         self._show_fault(ecu)
         self.workspace.refresh_live()
-        self.rate_label.setText(f"{ecu.link.rate():.1f}Hz" if hasattr(ecu.link, "rate") else "")
+        self._label_signal_strength()
+        self.rate_label.setText(self.rate_meter.tick())
         if self.runtime_window is not None and self.runtime_window.isVisible():
             self.runtime_window.refresh_live()
         if self.quick_tune_window is not None and self.quick_tune_window.isVisible():
@@ -2247,7 +1963,7 @@ class MainWindow(QtWidgets.QMainWindow):
         current = self.tree.currentItem()
         path = []
         while current is not None:
-            path.insert(0, current.text(0))
+            path.insert(0, _node_name(current))
             current = current.parent()
         parameters = self.form.parameters
         self._build_tree()
@@ -2258,7 +1974,7 @@ class MainWindow(QtWidgets.QMainWindow):
         items = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())]
         found = None
         for name in path:
-            found = next((item for item in items if item.text(0) == name), None)
+            found = next((item for item in items if _node_name(item) == name), None)
             if found is None:
                 return
             found.setExpanded(True)
@@ -2318,7 +2034,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def backup(self) -> None:
         if not self.worker.ecu:
             return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Back up settings", "ecu-backup.json", "JSON (*.json)")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Back up settings", str(Path(self.options.folder("map")) / "ecu-backup.json"), "JSON (*.json)")
         if path:
             try:
                 self.worker.ecu.backup(Path(path))
@@ -2333,6 +2049,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def open_map(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open map", self.options.folder("map"), self._map_dialog_filter())
+        if path:
+            self.options.remember("map", path[0] if isinstance(path, list) else path)
         if path:
             self.open_map_file(Path(path))
 
@@ -2353,17 +2071,55 @@ class MainWindow(QtWidgets.QMainWindow):
             self.download_map(path)
 
     def download_map(self, path: Path) -> None:
-        loaded = self._read_map(path, self.worker.ecu.info.serial)
+        ecu = self.worker.ecu
+        if self.protected:
+            self.show_error("Before performing this operation, password protection must be deactivated.")
+            return
+        loaded = self._read_map(path, ecu.info.serial)
         if loaded is None:
             return
+        compatible = self._map_compatibility(loaded, ecu.info)
+        if compatible == "disconnect":
+            self.worker.post("disconnect")
+            self.load_map(path)
+            return
+        if compatible != "go" or not self._engine_stopped(security.ENGINE_RUNNING):
+            return
         self.statusBar().showMessage("Downloading data to ECU ...")
-        self.call(lambda ecu: ecu.load_map(loaded.entries.values()), self._map_downloaded)
+
+        def download(live: Ecu) -> int:
+            try:
+                return live.load_map(loaded.entries.values())
+            except (EcuProtected, WriteRefused):
+                raise
+            except ProtocolError as exc:
+                raise WriteRefused(f"{security.DOWNLOAD_FAILED} ({exc})") from exc
+
+        self.call(download, self._map_downloaded)
+
+    def _map_compatibility(self, loaded: MapFile, info) -> str:
+        """PCLink's checks before a file is sent to a connected ECU: "go", "disconnect" or "cancel"."""
+        buttons = QtWidgets.QMessageBox.StandardButton
+        file_link = int(loaded.memory.get("LinkID", ("1", "0"))[1] or 0)
+        if file_link and (file_link >= security.G5_LINK_ID) != (info.link_id >= security.G5_LINK_ID):
+            text = security.G5_FILE_ON_G4X if file_link >= security.G5_LINK_ID else security.G4X_FILE_ON_G5
+            if QtWidgets.QMessageBox.warning(self, "Warning", text, buttons.Ok | buttons.Cancel) == buttons.Ok:
+                return "disconnect"
+            return "cancel"
+        try:
+            file_major = int(loaded.memory.get("Firmware", ("3", ""))[1].split(".")[0])
+            ecu_major = int(info.firmware.split(".")[0])
+        except ValueError:
+            return "go"
+        if ecu_major < 5 <= file_major and not self._confirm("Warning", security.NEWER_SETTINGS):
+            return "cancel"
+        return "go"
 
     def _map_downloaded(self, cells: int) -> None:
-        self.form.show_parameters(self.form.parameters)
         self.statusBar().showMessage(f"{cells} values changed.", 6000)
         if self._confirm("Store", "File opened and downloaded successfully.\nDo you wish to carry out a store command on the ECU?"):
             self.worker.post("store")
+        self.connect_to(self._uri)
 
     def load_map(self, path: Path) -> None:
         loaded = self._read_map(path)
@@ -2373,10 +2129,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _read_map(self, path: Path, serial: int | None = None) -> MapFile | None:
         try:
             return MapFile.load(path, self.database.map_key, serial)
-        except ProtectedFile as exc:
-            self.show_error(str(exc))
+        except ProtectedFile:
+            QtWidgets.QMessageBox.information(self, "OpenPCLink", f"{security.NOT_OPENED} {path.name}\n{security.LOCKED_FILE}")
         except (BadContainer, MapError, OSError, ValueError) as exc:
-            self.show_error(f"Could not open {path.name}: {exc}")
+            self.show_error(f"{security.NOT_OPENED} {path.name}\n{exc}")
         return None
 
     def save_map(self) -> None:
@@ -2385,6 +2141,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         default = str(Path(self.options.folder("map")) / ("tune.pcl5" if ecu.info.link_id >= 50000 else "tune.pclx"))
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save map", default, self._map_dialog_filter())
+        if path:
+            self.options.remember("map", path)
         if path:
             self.save_map_to(Path(path))
 
@@ -2398,70 +2156,124 @@ class MainWindow(QtWidgets.QMainWindow):
             self.save_map_to(self._map_path)
 
     def save_map_encrypted(self) -> None:
+        """Locks a file to an ECU's serial number. PCLink asks for the file first, then the serial."""
         ecu = self.worker.ecu
         if ecu is None:
-            return
-        dialog = tools.SerialDialog(ecu.info.serial if isinstance(ecu, Ecu) else None, self)
-        if not dialog.exec():
             return
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save as Encrypted", self.options.folder("map"), self._map_dialog_filter())
         if not path:
             return
-        try:
-            content = ecu.map if isinstance(ecu, OfflineEcu) else MapFile.from_ecu(ecu, self.database, keep_lock=True)
-            content.save(Path(path), self.database.map_key, dialog.value())
+        self.options.remember("map", path[0] if isinstance(path, list) else path)
+        dialog = tools.SerialDialog(ecu.info.serial if isinstance(ecu, Ecu) else None, self)
+        if not dialog.exec():
+            return
+        serial, key, database = dialog.value(), self.database.map_key, self.database
+        if isinstance(ecu, OfflineEcu):
+            try:
+                ecu.map.locked_copy().save(Path(path), key, serial)
+            except OSError:
+                self.show_error("Error: Failed to save file!")
+                return
             self.statusBar().showMessage("File saved successfully.", 6000)
-        except (EcuProtected, OSError) as exc:
-            self.show_error(str(exc))
+            return
+
+        def capture(live: Ecu) -> None:
+            if live.is_protected:
+                raise EcuProtected("a password-protected ECU cannot be saved to a map file")
+            live.set_file_lock(True)
+            try:
+                MapFile.from_ecu(live, database, keep_lock=True).save(Path(path), key, serial)
+            except OSError as exc:
+                raise WriteRefused(f"Error: Failed to save file! ({exc})") from exc
+            finally:
+                live.set_file_lock(False)
+
+        self.call(capture, lambda _r: self.statusBar().showMessage("File saved successfully.", 6000))
 
     def save_map_to(self, path: Path) -> None:
         ecu = self.worker.ecu
-        try:
-            if isinstance(ecu, OfflineEcu):
+        if isinstance(ecu, OfflineEcu):
+            try:
                 ecu.save(path, self.database.map_key)
-                self.unstored_label.clear()
-            else:
-                MapFile.from_ecu(ecu, self.database).save(path, self.database.map_key)
-            self._map_path = Path(path)
-            self.statusBar().showMessage(f"Saved {path}", 6000)
-        except (EcuProtected, OSError) as exc:
-            self.show_error(str(exc))
+            except OSError as exc:
+                self.show_error(str(exc))
+                return
+            self.unstored_label.clear()
+            self._map_saved(path)
+            return
+        key, database = self.database.map_key, self.database
+
+        def capture(live: Ecu) -> None:
+            try:
+                MapFile.from_ecu(live, database).save(Path(path), key)
+            except OSError as exc:
+                raise WriteRefused(f"Error: Failed to save file! ({exc})") from exc
+
+        self.call(capture, lambda _r: self._map_saved(path))
+
+    def _map_saved(self, path: Path) -> None:
+        self._map_path = Path(path)
+        self.statusBar().showMessage("File saved successfully.", 6000)
 
     def compare_map(self) -> None:
+        """PCLink's Compare: the file's values show beside the live ones, in yellow, until Compare Close."""
         ecu = self.worker.ecu
         if ecu is None:
+            self.show_error("Connect to an ECU or open a map first.")
             return
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Compare with map", "", self._map_dialog_filter())
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Compare", self.options.folder("map"), self._map_dialog_filter())
         if not path:
             return
-        other = self._read_map(Path(path))
+        other = self._read_map(Path(path), ecu.info.serial if isinstance(ecu, Ecu) else None)
         if other is None:
             return
-        try:
-            current = ecu.map if isinstance(ecu, OfflineEcu) else MapFile.from_ecu(ecu, self.database)
-        except EcuProtected as exc:
-            self.show_error(str(exc))
-            return
+        self.compare_state = security.CompareState(other, Path(path))
         self.compare_action_close.setEnabled(True)
-        self._show_differences(compare(current, other))
+        self.statusBar().showMessage(f"Comparing with {Path(path).name}", 6000)
+        self.form.show_parameters(self.form.parameters)
 
-    def _show_differences(self, differences) -> None:
-        dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle(f"{len(differences)} settings differ")
-        dialog.resize(760, 480)
-        table = QtWidgets.QTableWidget(len(differences), 4)
-        table.setHorizontalHeaderLabels(["Setting", "Cells", "Current", "Map file"])
-        table.horizontalHeader().setStretchLastSection(True)
-        table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        for row, difference in enumerate(differences):
-            known = self.database.known(difference.data_id)
-            caption = self.database.parameter(difference.data_id).caption if known else str(difference.data_id)
-            for column, value in enumerate((caption, difference.cells, difference.first_a, difference.first_b)):
-                table.setItem(row, column, QtWidgets.QTableWidgetItem(f"{value:g}" if isinstance(value, float) else str(value)))
-        table.resizeColumnToContents(0)
-        QtWidgets.QVBoxLayout(dialog).addWidget(table)
-        dialog.show()
-        self.compare_dialog = dialog
+    def compare_close(self) -> None:
+        self.compare_state = None
+        self.compare_action_close.setEnabled(False)
+        self.form.show_parameters(self.form.parameters)
+
+    def compare_field(self, parameter: Parameter, editor: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        """The editor, with the compare file's value beside it when Compare is on."""
+        state = self.compare_state
+        entry = state.entry(parameter.data_id) if state is not None and parameter.data_id not in SECRET_IDS else None
+        if entry is None:
+            return editor
+        label = QtWidgets.QLabel(self._compare_text(parameter, entry))
+        label.setStyleSheet("color:#c8a400;font-weight:bold")
+        box = QtWidgets.QWidget()
+        row = QtWidgets.QHBoxLayout(box)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(editor, 1)
+        row.addWidget(label)
+        return box
+
+    def _compare_text(self, parameter: Parameter, entry) -> str:
+        if entry.kind == TYPE_STRING:
+            return entry.text
+        values = entry.values
+        if len(values) > 1:
+            ecu = self.worker.ecu
+            try:
+                mine = ecu.get_all(parameter.data_id)
+            except (EcuProtected, KeyError):
+                return f"{len(values)} values"
+            tolerance = abs(entry.multi) / 2 if entry.multi else 1e-6
+            differing = sum(1 for a, b in zip(mine, values) if abs(a - b) > tolerance) + abs(len(mine) - len(values))
+            return f"{differing} of {len(values)} differ"
+        value = values[0] if values else 0.0
+        if parameter.options and 0 <= int(value) < len(parameter.options):
+            return parameter.options[int(value)]
+        kind = self.kind_of(parameter)
+        decimals = parameter.decimals if parameter.decimals is not None else (0 if entry.multi == 1 else 3)
+        decimals = self.units.decimals(decimals, kind)
+        text = f"{self.units.to_display(value, kind):.{decimals}f}"
+        units = self.units_of(parameter)
+        return f"{text} {units}".strip()
 
     # ---- logging ----------------------------------------------------------
 
@@ -2495,8 +2307,13 @@ class MainWindow(QtWidgets.QMainWindow):
         channels = [(i, self.database.parameter(i).caption) for i in ids]
         units = [self.database.parameter(i).units for i in ids]
         settings = self.options.log_settings
-        rate = float(settings.get("rate", "20 Hz").split()[0])
-        logger = PcLogger(path, channels, units, 1.0 / rate if rate else 0.0, bool(settings.get("keep_all", False)))
+        rate = float(settings.get("rate", "40 Hz").split()[0])
+        history = None if path or not settings.get("history", True) or self._history is None else self._history.snapshot()
+        logger = PcLogger(path, channels, units, 1.0 / rate if rate else 0.0, bool(settings.get("keep_all", False)), history)
+        for series in logger.log.series:
+            key = self.database.parameter(series.data_id).value_type
+            if key:
+                series.units, series.unit_key = "", key
         logger.log.details["ECU"] = ""
         logger.log.details["Firmware Version"] = ecu.info.firmware
         logger.log.details["Serial Number"] = str(ecu.info.serial)
@@ -2524,7 +2341,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_action.setText("Record")
         self.log_state_label.setText("PC Log = Off")
 
+    def _sample_history(self, ecu) -> None:
+        """The online sample history: a ring of recent values, filled while connected and not recording."""
+        settings = self.options.log_settings
+        if not settings.get("history", True) or self.worker.logger:
+            return
+        size = int(settings.get("history_size", 100))
+        if self._history is None or self._history.samples.maxlen != size:
+            ids = [i for i in self.recorded_ids() if i in ecu.table and i not in SECRET_IDS and self.database.known(i)]
+            self._history = SampleHistory(ids, size)
+        self._history.add(ecu.get)
+
+    def log_settings_changed(self) -> None:
+        self._history = None
+        self.log_session.open_zoom = int(self.options.log_settings.get("open_zoom", 0))
+
     def _auto_record(self, ecu) -> None:
+        self._sample_history(ecu)
         settings = self.options.log_settings
         source = int(settings.get("auto_id", 0))
         if not source or source not in ecu.table:
@@ -2546,6 +2379,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.log_timer.stop()
             self.play_action.setText("Play")
         elif self.log_session.log is not None:
+            self.log_timer.setInterval(round(playback_interval(self.options.log_settings) * 1000))
+            self._play_last = time.monotonic()
             self.log_timer.start()
             self.play_action.setText("Pause")
 
@@ -2556,20 +2391,25 @@ class MainWindow(QtWidgets.QMainWindow):
             self.log_timer.stop()
             self.play_action.setText("Play")
             return
-        session.set_cursor(session.cursor + PLAYBACK_INTERVAL_MS / 1000)
+        now = time.monotonic()
+        session.set_cursor(session.cursor + (now - getattr(self, "_play_last", now) or playback_interval(self.options.log_settings)))
+        self._play_last = now
 
     def open_log(self) -> None:
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "Open Log File", self.options.folder("log"), "Log Files (*.llg5 *.llgx *.csv)")
+        if paths:
+            self.options.remember("log", paths[0] if isinstance(paths, list) else paths)
         for path in paths:
             self.open_log_path(Path(path))
 
-    def open_log_path(self, path: Path) -> None:
+    def open_log_path(self, path: Path, show: bool = True) -> None:
         try:
             self.log_session.add(read_log(path))
         except (OSError, ValueError, StopIteration, LogFormatError) as exc:
             self.show_error(f"Could not open that log: {exc}")
             return
-        self.display_stack.setCurrentIndex(1)
+        if show:
+            self.display_stack.setCurrentIndex(1)
 
     def open_downloaded_logs(self, logs: list) -> None:
         for log in logs:
@@ -2602,6 +2442,8 @@ class MainWindow(QtWidgets.QMainWindow):
         name = log.details.get("Name") or "PC Datalog"
         extension = ".llg5" if str(log.details.get("Firmware Version", "7")).startswith("7") else ".llgx"
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Log File", str(Path(self.options.folder("log")) / f"{name}{extension}"), "Link Log Files (*.llg5 *.llgx)")
+        if path:
+            self.options.remember("log", path[0] if isinstance(path, list) else path)
         if path and self._save_log(log, Path(path)):
             self.log_manager.refresh()
 
@@ -2637,13 +2479,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if not dialog.exec():
             return
         extension, label = (".llg5", "Link Log Files (*.llg5)") if dialog.format.currentIndex() else (".csv", "CSV (*.csv)")
-        name = self.log_session.log.details.get("Name") or "log"
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export", str(Path(self.options.folder("log")) / f"{name} - Export{extension}"), label)
+        log = self.log_session.log
+        name = log.path.stem if log.path else log.details.get("Name") or "log"
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export", str(Path(self.options.folder("log")) / f"{name}{extension}"), label)
+        if path:
+            self.options.remember("log", path[0] if isinstance(path, list) else path)
         if path:
             try:
                 tools.export_log(self.log_session, dialog, Path(path))
             except OSError as exc:
                 self.show_error(str(exc))
+                return
+            QtWidgets.QMessageBox.information(self, "Information", "File exported successfully.")
 
     def setup_logging(self) -> None:
         tools.LoggingSetupDialog(self, self).exec()
@@ -2679,14 +2526,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def show_topic(self, name: str) -> None:
         """A manual page in its own window, as PCLink opens its help file."""
         if self.help_window is None:
-            self.help_window = QtWidgets.QTextBrowser()
-            self.help_window.setWindowTitle("Link ECU Online Manual")
-            self.help_window.setOpenLinks(False)
-            self.help_window.anchorClicked.connect(lambda url: self._help_link(url, self.help_window))
-            self.help_window.resize(860, 640)
-        self._show_page(self.help_window, self.manual.page_for(name) or f"<p>The manual has no page called {name}.</p>")
-        self.help_window.show()
-        self.help_window.raise_()
+            self.help_window = ManualWindow(self.manual)
+        self.help_window.show_topic(name)
 
     def _help_link(self, url: QtCore.QUrl, browser: QtWidgets.QTextBrowser | None = None) -> None:
         name = Path(url.path()).stem or url.toString()
@@ -2735,29 +2576,56 @@ def _fallback_log_layout() -> Layout:
     return Layout([LayoutPage("Time Plot", [plot, navigator])], "Time Plot")
 
 
+def _choose_and_import(parent: QtWidgets.QWidget | None, message: str) -> bool | None:
+    """Ask for the user's PCLink and import it. True if imported, False if it failed, None if declined."""
+    answer = QtWidgets.QMessageBox.information(
+        parent, "PCLink data needed", message,
+        QtWidgets.QMessageBox.StandardButton.Open | QtWidgets.QMessageBox.StandardButton.Cancel,
+    )
+    if answer != QtWidgets.QMessageBox.StandardButton.Open:
+        return None
+    path, _ = QtWidgets.QFileDialog.getOpenFileName(
+        parent, "Select PCLink", str(Path.home()), "PCLink (*.exe ECU.cfgr)"
+    )
+    if not path:
+        return None
+    source = Path(path)
+    try:
+        import_pclink(source.parent if source.name == "ECU.cfgr" else source)
+    except (ImportFailed, OSError, ValueError) as exc:
+        QtWidgets.QMessageBox.critical(parent, "Import failed", str(exc))
+        return False
+    return True
+
+
 def _load_database(parent: QtWidgets.QWidget | None = None) -> Database | None:
     while True:
         try:
             return Database.load()
         except DatabaseMissing:
-            answer = QtWidgets.QMessageBox.information(
-                parent, "PCLink data needed",
+            done = _choose_and_import(
+                parent,
                 "OpenPCLink reads parameter names and limits from your own copy of PCLink.\n\n"
                 "Choose your PCLink installer (.exe), or an installed PCLink folder's ECU.cfgr.",
-                QtWidgets.QMessageBox.StandardButton.Open | QtWidgets.QMessageBox.StandardButton.Cancel,
             )
-            if answer != QtWidgets.QMessageBox.StandardButton.Open:
+            if done is None:
                 return None
-            path, _ = QtWidgets.QFileDialog.getOpenFileName(
-                parent, "Select PCLink", str(Path.home()), "PCLink (*.exe ECU.cfgr)"
-            )
-            if not path:
-                return None
-            source = Path(path)
-            try:
-                import_pclink(source.parent if source.name == "ECU.cfgr" else source)
-            except (ImportFailed, OSError, ValueError) as exc:
-                QtWidgets.QMessageBox.critical(parent, "Import failed", str(exc))
+
+
+def _offer_reimport(database: Database) -> Database:
+    """Data imported by an older OpenPCLink lacks the firmware, CAN keys and PCLink's layouts."""
+    if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+        return database
+    gaps = assets.data_gaps(database)
+    if not gaps:
+        return database
+    done = _choose_and_import(
+        None,
+        "Your imported PCLink data comes from an older OpenPCLink and is missing:\n\n  - " + "\n  - ".join(gaps)
+        + "\n\nOpenPCLink works without them, with simpler built-in layouts. To add them, choose your PCLink "
+        "installer (.exe), or an installed PCLink folder's ECU.cfgr. Cancel to carry on.",
+    )
+    return Database.load() if done else database
 
 
 def main() -> int:
@@ -2768,12 +2636,15 @@ def main() -> int:
     database = _load_database()
     if database is None:
         return 1
+    database = _offer_reimport(database)
     window = MainWindow(database)
     if window.options.start_full_screen:
         window.set_full_screen(2)
     if os.environ.get(READ_ONLY_ENV):
         window.setWindowTitle(f"{window.windowTitle()} — READ ONLY")
     window.show()
+    if not window.options.connection_manual:
+        QtCore.QTimer.singleShot(500, window.connect_on_startup)
     return app.exec()
 
 

@@ -52,6 +52,20 @@ def user_config_path() -> Path:
     return default_db_path().with_name("DefaultParameterConfig.rtcr")
 
 
+def data_gaps(database) -> list[str]:
+    """What an older import left out. Importing again from the PCLink installer fills these in."""
+    gaps = []
+    if not database.firmware_key:
+        gaps.append("firmware key (Firmware Update cannot check images)")
+    if not database.stream_key or not database.file_key:
+        gaps.append("CAN file keys (CAN stream and custom CAN files cannot be opened)")
+    if asset("Layouts") is None:
+        gaps.append("PCLink's own screen layouts")
+    if asset("Firmware") is None:
+        gaps.append("the firmware package")
+    return gaps
+
+
 def copy_assets(folder: Path, destination: Path | None = None) -> None:
     """Keep these beside the database, so the installer or PCLink folder is not needed again."""
     destination = destination or assets_dir()
@@ -62,6 +76,9 @@ def copy_assets(folder: Path, destination: Path | None = None) -> None:
     for name in FOLDERS:
         if (folder / name).is_dir():
             shutil.copytree(folder / name, destination / name, dirs_exist_ok=True)
+    from .logviews import extract_plan_images
+
+    extract_plan_images(folder / "PCLink.exe", destination / "VehiclePlan")
 
 
 @dataclass(frozen=True)

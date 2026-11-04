@@ -16,6 +16,26 @@ ITEMS = (
     ("GradientLow", "Gradient Low"), ("GradientMiddle", "Gradient Middle"), ("GradientHigh", "Gradient High"),
     ("Background Centre", "Background Centre"), ("Background Edge", "Background Edge"),
 )
+LIST_TITLES = {
+    "OK": "Ok", "WarningLow": "Soft Warning Value", "WarningHigh": "Hard Warning Value", "OfflineValueChanged": "Value Changed Offline",
+    "View Title Bar": "View Titlebar Background", "Background Centre": "Layout Background",
+}
+PALETTE = (
+    "000000 ffffff ff0000 00ff00 0000ff ff8080 40ff40 3096ff ffa020 "
+    "b46eff f0f000 ff20e0 ff8080 0f0f0f 474747 7f7f7f b7b7b7 efefef"
+).split()
+CUSTOM_NAME = "Custom"
+
+
+def list_entries() -> list[tuple[str, str]]:
+    """The Theme Items list as PCLink shows it: alphabetical, the two warnings last. Layout Background sets both background keys."""
+    titles = dict(ITEMS)
+    titles.update(LIST_TITLES)
+    entries = [(key, titles[key]) for key in titles if key not in ("Background Edge", "WarningLow", "WarningHigh")]
+    entries.sort(key=lambda entry: entry[1].lower())
+    return entries + [("WarningLow", titles["WarningLow"]), ("WarningHigh", titles["WarningHigh"])]
+
+
 _TABLE = {
     "Blue": "34230f 1e140d ffffff 34230f 808080 808080 ffffff 00ffff b0b0ff 0000ff 50ff50 0f50ff 3232ff ffff00 000080 50ff50 ff9630 faaaff aaffff aafffa 8b720e 7c4b0c",
     "White": "ffffff dcdcdc 231400 ffffff 320000 c0c0c0 505050 00dcdc b0b0ff 0000ff 008000 00a5ff 3232ff ffff00 000080 50ff50 ff9630 b0b0ff b0ffff b0ffb0 fafafa fafafa",
@@ -32,6 +52,7 @@ _PARAMETERS = {
     "Black": "f5f5f5 00ff00 ff9630 00f0f0 e020ff efefef ffff00 0080ff 008080 ff80ff b7b7b7 e22178",
 }
 THEME_NAMES = ("Blue", "White", "Black", "Gray")
+_CUSTOM_BASE = "base"
 
 
 def _numbers(text: str) -> list[int]:
@@ -44,22 +65,24 @@ class Theme:
     items: dict[str, int]
     overlays: list[int]
     parameters: list[int]
+    base: str = "Black"
 
     @classmethod
     def built_in(cls, name: str) -> "Theme":
-        return cls(name, dict(zip((key for key, _ in ITEMS), _numbers(_TABLE[name]))), _numbers(_OVERLAYS[name]), _numbers(_PARAMETERS[name]))
+        return cls(name, dict(zip((key for key, _ in ITEMS), _numbers(_TABLE[name]))), _numbers(_OVERLAYS[name]), _numbers(_PARAMETERS[name]), name)
 
     @classmethod
     def from_saved(cls, saved: dict) -> "Theme":
-        base = cls.built_in(saved.get("base", "Black"))
+        base = cls.built_in(saved.get(_CUSTOM_BASE) if saved.get(_CUSTOM_BASE) in THEME_NAMES else saved.get("name") if saved.get("name") in THEME_NAMES else "Black")
         base.name = saved.get("name", base.name)
+        base.base = base.base if _CUSTOM_BASE not in saved or saved[_CUSTOM_BASE] not in THEME_NAMES else saved[_CUSTOM_BASE]
         base.items.update(saved.get("items", {}))
-        base.overlays = saved.get("overlays", base.overlays)
-        base.parameters = saved.get("parameters", base.parameters)
+        base.overlays = list(saved.get("overlays", base.overlays))
+        base.parameters = list(saved.get("parameters", base.parameters))
         return base
 
     def saved(self) -> dict:
-        return {"name": self.name, "items": self.items, "overlays": self.overlays, "parameters": self.parameters}
+        return {"name": self.name, "items": self.items, "overlays": self.overlays, "parameters": self.parameters, _CUSTOM_BASE: self.base}
 
     def colour(self, item: str) -> QtGui.QColor:
         return tcolor(self.items[item])
@@ -102,6 +125,6 @@ class Theme:
 
 def theme_named(options) -> Theme:
     saved = options.themes.get(options.theme) if options.themes else None
-    if saved:
+    if saved and options.theme not in THEME_NAMES:
         return Theme.from_saved(saved)
     return Theme.built_in(options.theme if options.theme in THEME_NAMES else "Black")

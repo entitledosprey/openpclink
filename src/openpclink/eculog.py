@@ -12,7 +12,10 @@ MAX_LOG_CHANNELS = 1000
 MAX_DIVIDER = 10000
 RETRIES = 10
 RECORD_SIZE = 20
-RECORD_NAMES = {1: "Record Start", 3: "Record Resume", 4: "ECU Log Marker"}
+RECORD_NAMES = {1: "Record Start", 3: "Record Resume", 4: "Key Press"}
+BASE_RATE = 1000  # PCLink shows rates and data rate against 1000 Hz, whatever the ECU's tick
+STREAM_REQUEST = 20_000_000
+NO_STREAM_BELOW = (6, 18)
 RECORD_RESYNC = 2
 
 
@@ -26,6 +29,7 @@ class LogInfo:
     file_count: int
     record_magic: int
     max_channels: int
+    max_rate: int = 0
 
     @classmethod
     def parse(cls, body: bytes) -> "LogInfo":
@@ -34,6 +38,7 @@ class LogInfo:
         return cls(
             struct.unpack_from(">I", body, 0)[0], struct.unpack_from(">H", body, 4)[0],
             struct.unpack_from(">I", body, 0x0D)[0], struct.unpack_from(">H", body, 0x11)[0],
+            struct.unpack_from(">I", body, 0x13)[0] if len(body) >= 0x17 else 0,
         )
 
     @property
@@ -58,11 +63,11 @@ class EcuLogHeader:
     clock: tuple[int, int, int] | None = None
     data_start: int = 0
 
-    def bytes_per_second(self, tick_rate: int) -> float:
-        return 4 * sum(tick_rate / divider for _id, divider in self.channels if divider)
+    def bytes_per_second(self) -> float:
+        return 4 * sum(BASE_RATE / divider for _id, divider in self.channels if divider)
 
-    def duration(self, size: int, tick_rate: int) -> float:
-        rate = self.bytes_per_second(tick_rate)
+    def duration(self, size: int) -> float:
+        rate = self.bytes_per_second()
         return size / rate if rate else 0.0
 
     def date_text(self) -> str:
@@ -95,8 +100,10 @@ def parse_header(data: bytes) -> EcuLogHeader:
     return header
 
 
-def decode_samples(data: bytes, header: EcuLogHeader, info: LogInfo, series: list[Series], log: Log, start: float = 0.0) -> float:
-    """Adds one file's samples to the series and returns the time it ends at."""
+def decode_samples(data: bytes, header: EcuLogHeader, info: LogInfo, series: list[Series], log: Log, start: float = 0.0, label: str = RECORD_NAMES[4], close_sections: bool = False) -> float:
+    """Adds one file's samples to the series and returns the time it ends at.
+
+    PCLink closes a section just before every marker of a file joined onto an earlier one."""
     dt = 1.0 / info.tick_rate if info.tick_rate else 1.0
     used = len(data)
     pos = header.data_start
@@ -116,7 +123,9 @@ def decode_samples(data: bytes, header: EcuLogHeader, info: LogInfo, series: lis
             tick = struct.unpack_from(">I", data, pos + 16)[0]
             pos += RECORD_SIZE
             if kind != RECORD_RESYNC:
-                log.add_marker(Marker(1 if kind == 4 else KIND_SECTION, RECORD_NAMES[kind], when))
+                if close_sections:
+                    log.add_marker(Marker(KIND_SECTION, "EOL", when - dt))
+                log.add_marker(Marker(1 if kind == 4 else KIND_SECTION, label if kind == 4 else RECORD_NAMES[kind], when))
         before = pos
         while pos + 4 <= used and not at_record():
             for (_id, divider), channel in zip(header.channels, series):
@@ -139,8 +148,8 @@ class EcuLogs:
         self.link = link
 
     @staticmethod
-    def _file_request(operation: int, b4: int, b5: int, offset: int = 0, name: str | None = None) -> bytes:
-        payload = struct.pack(">IBBII", operation, b4, b5, offset, 0)
+    def _file_request(operation: int, b4: int, b5: int, offset: int = 0, name: str | None = None, count: int = 0) -> bytes:
+        payload = struct.pack(">IBBII", operation, b4, b5, offset, count)
         return payload if name is None else payload + name.encode("latin-1", "replace") + b"\0"
 
     def info(self) -> LogInfo:
@@ -190,6 +199,44 @@ class EcuLogs:
             self.link.request(p.CMD_FILE, self._file_request(p.FILE_READ, 1, 0, 0, ""), 1.0)
         return bytes(data)
 
+    def stream_log_file(self, name: str, size: int, progress: Callable[[int], bool] | None = None) -> bytes:
+        """PCLink's faster download: one request, many replies. `progress` may return False to cancel."""
+        data = bytearray()
+        cancelled = False
+        while len(data) < size and not cancelled:
+            got = 0
+            for chunk in self.link.request_stream(p.CMD_FILE, self._file_request(p.FILE_STREAM, 1, 0, len(data), name, STREAM_REQUEST), 1.0):
+                got += len(chunk)
+                data += chunk[: size - len(data)]
+                if progress and progress(len(data)) is False:
+                    cancelled = True
+                    break
+            if got < STREAM_REQUEST:
+                break
+        try:
+            list(self.link.request_stream(p.CMD_FILE, self._file_request(p.FILE_STREAM, 1, 0, 0, "", STREAM_REQUEST), 1.0))
+        except p.ProtocolError:
+            pass
+        return bytes(data)
+
+    def can_stream(self, firmware: str) -> bool:
+        try:
+            major, minor = (int(part) for part in firmware.split(".")[:2])
+        except ValueError:
+            return True
+        return (major, minor) >= NO_STREAM_BELOW or major > 6
+
+    def download(self, entry: "EcuLogEntry", firmware: str, progress: Callable[[int], bool] | None = None) -> bytes:
+        """Streamed where the firmware allows it, by polling otherwise or when streaming gets nothing."""
+        if self.can_stream(firmware):
+            try:
+                data = self.stream_log_file(entry.name, entry.size, progress)
+                if data:
+                    return data
+            except p.EcuError:
+                pass
+        return self.read_log_file(entry.name, entry.size, progress)
+
     def read_named(self, name: str) -> bytes:
         """An ECU file other than a log: the memo or the CAN file."""
         data = bytearray()
@@ -206,11 +253,12 @@ class EcuLogs:
         self.link.request(command, struct.pack(">H", 1), 1.0)
 
 
-def build_logs(files: list[tuple[str, bytes]], info: LogInfo, describe: Callable[[int], tuple[str, str]]) -> list[Log]:
+def build_logs(files: list[tuple[str, bytes]], info: LogInfo, describe: Callable[[int], tuple[str, str]], label: str = RECORD_NAMES[4]) -> list[Log]:
     """Decode files, joining neighbours with the same channels into one log, as PCLink does."""
     logs: list[Log] = []
     previous: list[tuple[int, int]] | None = None
     when = 0.0
+    dt = 1.0 / info.tick_rate if info.tick_rate else 1.0
     log: Log | None = None
     series: list[Series] = []
     for _name, data in files:
@@ -218,16 +266,17 @@ def build_logs(files: list[tuple[str, bytes]], info: LogInfo, describe: Callable
         if log is None or header.channels != previous:
             log = Log()
             series = []
-            dt = 1.0 / info.tick_rate if info.tick_rate else 1.0
             for data_id, divider in header.channels:
                 name, units = describe(data_id)
                 series.append(Series(data_id, name, units, period=divider * dt))
             log.series = series
-            log.details["Data Source"] = "ECU Internal Datalog"
             logs.append(log)
             previous = header.channels
             when = 0.0
-        when = decode_samples(data, header, info, series, log, when)
+        joined = when > 0.0
+        if joined:
+            log.add_marker(Marker(KIND_SECTION, "EOL", when - dt))
+        when = decode_samples(data, header, info, series, log, when, label, joined)
     for done in logs:
         done.markers.sort(key=lambda marker: marker.time)
         done.normalise_sections()

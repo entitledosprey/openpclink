@@ -61,6 +61,8 @@ CMD_CAN_CONTROL = 0x35
 CMD_WRITE_MEMO = 0x36
 CMD_WRITE_CAN_FILE = 0x38
 CMD_SET_CLOCK = 0x39
+CMD_COMMS_STAMP = 0x3D
+CMD_COMMS_STATUS = 0x3B
 
 # Only these commands can be sent through request(). The firmware updater's commands
 # and the factory reset (0x21, right next to Store) can brick or wipe an ECU, so they
@@ -101,6 +103,8 @@ ALLOWED_COMMANDS = frozenset(
         CMD_WRITE_MEMO,
         CMD_WRITE_CAN_FILE,
         CMD_SET_CLOCK,
+        CMD_COMMS_STAMP,
+        CMD_COMMS_STATUS,
     }
 )
 DANGEROUS_COMMANDS = frozenset(
@@ -128,10 +132,12 @@ RETRYABLE_COMMANDS = frozenset(
     }
 )
 READ_ATTEMPTS = 3
+# What the G5 comms processor answers to read-only: its change poll, full dump and two status reads.
+READ_ONLY_EXTRA = frozenset({CMD_COMMS_POLL_A, CMD_COMMS_POLL_B, CMD_COMMS_STAMP, CMD_COMMS_STATUS})
 
 # Sub-operations of CMD_FILE.
 FILE_READ, FILE_DELETE, FILE_NEXT, FILE_STREAM, FILE_PAUSE_LOGGING, FILE_RESUME_LOGGING = 0, 1, 2, 3, 4, 5
-_READ_ONLY_FILE_OPERATIONS = (FILE_READ, FILE_NEXT)
+_READ_ONLY_FILE_OPERATIONS = (FILE_READ, FILE_NEXT, FILE_STREAM)
 _FEATURE_LOCK_WORDS = bytes.fromhex("0EF1DEAD0EF1DEAD")
 
 # Exactly what real PCLink sends. 0x1F has another form with no payload whose purpose is unknown.
@@ -191,6 +197,7 @@ class Link:
     transport: Transport
     addr: int = ADDR_MAIN
     max_packet: int = 0x38
+    timeout_scale: float = 1.0
 
     def _refused(self, cmd: int, payload: bytes) -> str | None:
         if cmd == CMD_CALIBRATE_MAP and payload != CALIBRATE_MAP_PAYLOAD:
@@ -199,7 +206,7 @@ class Link:
             return "the code that disables an ECU's features is not allowed"
         if os.environ.get(READ_ONLY_ENV):
             is_read = cmd == CMD_FILE and len(payload) >= 4 and struct.unpack_from(">I", payload)[0] in _READ_ONLY_FILE_OPERATIONS
-            if cmd not in RETRYABLE_COMMANDS and not is_read:
+            if cmd not in RETRYABLE_COMMANDS and cmd not in READ_ONLY_EXTRA and not is_read:
                 return f"read-only mode: command 0x{cmd:02X} was not sent"
         return None
 
@@ -220,7 +227,7 @@ class Link:
         if self.transport.write(request) != len(request):
             raise ProtocolError(f"short write sending command 0x{cmd:02X}")
 
-    def request(self, cmd: int, payload: bytes = b"", timeout: float = DEFAULT_TIMEOUT) -> bytes:
+    def request(self, cmd: int, payload: bytes = b"", timeout: float = DEFAULT_TIMEOUT, other=None) -> bytes:
         refused = "" if cmd in ALLOWED_COMMANDS else f"command 0x{cmd:02X} is not allowed"
         refused = refused or self._refused(cmd, payload)
         if refused:
@@ -228,7 +235,7 @@ class Link:
         attempts = READ_ATTEMPTS if cmd in RETRYABLE_COMMANDS else 1
         for attempt in range(1, attempts + 1):
             try:
-                return self._exchange(cmd, payload, timeout)
+                return self._exchange(cmd, payload, timeout, other)
             except EcuError:
                 raise
             except ProtocolError as exc:
@@ -238,24 +245,45 @@ class Link:
                     raise
         raise AssertionError("unreachable")
 
+    def request_stream(self, cmd: int, payload: bytes, timeout: float = DEFAULT_TIMEOUT):
+        """One request answered by many replies; yields each body until PCLink's end marker `00 01`."""
+        refused = "" if cmd in ALLOWED_COMMANDS else f"command 0x{cmd:02X} is not allowed"
+        refused = refused or self._refused(cmd, payload)
+        if refused:
+            raise ForbiddenCommand(refused)
+        self.transport.purge()
+        request = build_request(self.addr, cmd, payload)
+        if self.transport.write(request) != len(request):
+            raise ProtocolError(f"short write sending command 0x{cmd:02X}")
+        while True:
+            reply_cmd, body = self._read_reply(timeout * self.timeout_scale)
+            if reply_cmd == CMD_ERROR:
+                raise EcuError(cmd, struct.unpack(">H", body[:2])[0] if len(body) >= 2 else -1)
+            if reply_cmd == cmd:
+                if body == b"\x00\x01":
+                    return
+                yield body
+
     def _resync(self) -> None:
         """Wait for the line to go quiet, so a late reply is not read as the next one."""
         deadline = time.monotonic() + _RESYNC_LIMIT_S
         while time.monotonic() < deadline and self.transport.read(4096, _RESYNC_QUIET_S):
             pass
 
-    def _exchange(self, cmd: int, payload: bytes, timeout: float) -> bytes:
+    def _exchange(self, cmd: int, payload: bytes, timeout: float, other=None) -> bytes:
         self.transport.purge()
         request = build_request(self.addr, cmd, payload)
         if self.transport.write(request) != len(request):
             raise ProtocolError(f"short write sending command 0x{cmd:02X}")
         while True:
-            reply_cmd, body = self._read_reply(timeout)
+            reply_cmd, body = self._read_reply(timeout * self.timeout_scale)
             if reply_cmd == CMD_ERROR:
                 code = struct.unpack(">H", body[:2])[0] if len(body) >= 2 else -1
                 raise EcuError(cmd, code)
             if reply_cmd == cmd:
                 return body
+            if other is not None:
+                other(reply_cmd, body)
 
     def _read_reply(self, timeout: float) -> tuple[int, bytes]:
         header = self.transport.read(6, timeout)

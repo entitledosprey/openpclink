@@ -171,6 +171,10 @@ def _extract_help(folder: Path, destination: Path) -> bool:
         for page in Path(temp).rglob("*.htm*"):
             html = page.read_bytes().decode("utf-8", "replace")
             pages[page.stem.lower()] = _clean_help_page(html)
+        for contents in Path(temp).rglob("*.hhc"):
+            from .manual import parse_contents
+
+            pages["__contents__"] = parse_contents(contents.read_bytes().decode("utf-8", "replace"))
     if not pages:
         return False
     with gzip.open(destination, "wt", encoding="utf-8") as out:

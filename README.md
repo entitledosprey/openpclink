@@ -36,10 +36,15 @@ builds (`PCLink-EN-7.8.2.exe`) and the decompile workspace.
 To rebuild, or to build on an Intel Mac:
 
 ```sh
-brew install libusb innoextract   # innoextract is only for building from the installer
+brew install libusb innoextract p7zip   # innoextract is only for building from the installer; 7z unpacks the manual and its pictures
 packaging/build_macos.sh /path/to/PCLink-folder-or-installer
 packaging/build_linux.sh path/inside/repo/to/PCLink-folder amd64   # needs Docker
 ```
+
+The build bakes in PCLink's layouts, CAN setups, firmware package, view layouts, parameter config, logging
+options and manual pictures, and stops if any are missing. `OpenPCLink check --bundled` reports what a build holds.
+Data imported by an older OpenPCLink lacks the firmware, CAN keys and layouts: the app offers to import again at
+start-up, or run `openpclink import <installer or folder>` and then `openpclink check`.
 
 No driver is needed. G5 ECUs are USB serial devices; G4X ECUs use libusb, which is bundled.
 
@@ -64,6 +69,7 @@ In the app: pick a menu entry, edit a value, press Enter or Tab. Changes are liv
 
 ```sh
 openpclink ports
+openpclink check
 openpclink search "RPM Limit"
 openpclink get "RPM Limit Mode"
 openpclink set "RPM Limit Mode" 1

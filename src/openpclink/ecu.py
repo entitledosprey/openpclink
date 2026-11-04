@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import struct
 import time
 from dataclasses import asdict, dataclass, field
@@ -19,6 +20,7 @@ DESCRIPTOR_CHUNK = 0x24CC
 STATE_RUNNING = 1
 STORE_TIMEOUT = 1.5
 STATE_BOOTLOADER = 3
+STATE_TRAP = 4
 
 # Tuner password storage and protection state. PCLink's password check lives on
 # the PC and the password is held in plain text on the ECU, so a client that
@@ -26,6 +28,7 @@ STATE_BOOTLOADER = 3
 MASTER_PASSWORD_ID = 2294
 USER_PASSWORD_ID = 2295
 PROTECTION_STATE_IDS = (2303, 2324)
+FILE_LOCK_ID = 2303
 SECRET_IDS = frozenset({MASTER_PASSWORD_ID, USER_PASSWORD_ID, *PROTECTION_STATE_IDS})
 ENGINE_SPEED_ID = 1000
 # Settings real PCLink was seen to padlock while the engine runs: Number of
@@ -41,9 +44,11 @@ ETHROTTLE_INACTIVE = (0, 3)  # OFF and Disabled.
 CALIBRATION_TIMEOUT = 1.5
 FACTORY_TIMEOUT = 1.0
 FACTORY_SETTLE_S = 0.5
+FIRST_COMMS_PRODUCT = 1012
 PASSWORD_LENGTH = 20
 PASSWORD_MINIMUM = 3
 COMMS_FIRST_ID = 10000
+WIFI_PASSWORD_ID = 10014  # held in plain text; never logged or written to a backup
 MEMO_FILE = "Memo"
 CAN_FILE = "CANFile"
 ERROR_ENGINE_RUNNING = 4
@@ -130,6 +135,10 @@ class CommsValue:
         item._decode(body[0x16:], 0)
         return item
 
+    def complete(self, body: bytes) -> bool:
+        """The record already carries every element, so no 2B read is needed."""
+        return len(body) - 0x16 >= self.count * 4
+
     def _decode(self, raw: bytes, start: int) -> None:
         if self.is_text:
             self.text = raw[: self.count * 2].decode("utf-16-be", "replace").split("\0", 1)[0]
@@ -159,6 +168,10 @@ def _version(body: bytes) -> str:
     return f"{major}.{minor}.{patch}"
 
 
+class TrapMode(p.ProtocolError):
+    """The ECU has had an exception and will not connect."""
+
+
 class Ecu:
     def __init__(self, transport: Transport, database: Database | None = None) -> None:
         self.link = p.Link(transport)
@@ -170,9 +183,11 @@ class Ecu:
         self._dirty = False
         self._unlocked = False
         self.memo: str | None = None
-        self._memo_changed = False
         self.logs = EcuLogs(self.link)
         self.comms: dict[int, "CommsValue"] = {}
+        self.comms_firmware = ""
+        self.comms_boot = ""
+        self._comms_top = COMMS_FIRST_ID
         self.baseline = b""
 
     # ---- connection -------------------------------------------------------
@@ -182,6 +197,8 @@ class Ecu:
         self._require_running()
         boot = self._info_block(p.CMD_BOOT_INFO)
         firmware = self._info_block(p.CMD_FIRMWARE_INFO)
+        if len(boot) >= 0x4A and has_comms_processor(struct.unpack_from(">H", boot, 0x48)[0]):
+            self._comms_info()
         identity = self.link.request(p.CMD_IDENTITY)
         memory = self.link.request(p.CMD_MEMORY_INFO)
         if len(memory) < 0x14 or len(boot) < 0x4A or len(firmware) < 16 or len(identity) < 2:
@@ -206,9 +223,11 @@ class Ecu:
         self.memory = bytearray(runtime_size + config_size + section2_size)
         self.reload()
         self.poll_runtime()
-        if has_comms_processor(self.info.hardware_family):
+        if self._comms_top > COMMS_FIRST_ID:
             try:
                 self._load_comms()
+                self.send_clock()
+                self.poll_comms()
             except p.ProtocolError as exc:
                 log.warning("comms processor settings unavailable: %s", exc)
         self.baseline = bytes(self.memory)
@@ -227,10 +246,12 @@ class Ecu:
                 time.sleep(0.05)
                 continue
             break
+        if state == STATE_TRAP:
+            raise TrapMode("ECU is in trap mode")
         if state != STATE_RUNNING:
             raise p.ProtocolError(
                 f"ECU is not running its main firmware (state {state}). "
-                "It may be in bootloader mode; use official PCLink to recover it."
+                "If it is in bootloader mode, run ECU Controls > Update Firmware again to recover it."
             )
 
     def _info_block(self, cmd: int) -> bytes:
@@ -283,6 +304,22 @@ class Ecu:
         info = self._need_info()
         body = self.link.request(p.CMD_POLL_RUNTIME)
         self.memory[0 : min(len(body), info.runtime_size)] = body[: info.runtime_size]
+
+    def poll_comms(self) -> None:
+        """Ask the G5 comms processor which of its values changed (WiFi signal, clock) and take them."""
+        if not self.comms:
+            return
+
+        def take(cmd: int, body: bytes) -> None:
+            if len(body) >= 10:
+                item = self.comms.get(struct.unpack_from(">H", body, 4)[0])
+                if item is not None:
+                    item.apply(body)
+
+        try:
+            self._on_comms(lambda: self.link.request(p.CMD_COMMS_POLL_A, other=take))
+        except p.EcuError:
+            pass
 
     def _need_info(self) -> EcuInfo:
         if self.info is None:
@@ -391,6 +428,31 @@ class Ecu:
         self._write_memory(loc.offset + loc.width * index, self._encode(loc, value))
         return self._read_raw_number(loc, index)
 
+    def set_cells(self, data_id: int, cells: dict[int, float]) -> None:
+        """Write several elements of one table: a single frame for each run of neighbouring cells."""
+        loc = self._writable(data_id)
+        if data_id in self.comms or loc.is_bitfield or loc.is_string:
+            for index, value in cells.items():
+                self.set(data_id, value, index)
+            return
+        encoded: dict[int, bytes] = {}
+        for index, value in cells.items():
+            if not 0 <= index < loc.count:
+                raise WriteRefused(f"parameter {data_id} has no element {index}")
+            if self.database is not None:
+                try:
+                    self.database.check_range(data_id, value)
+                except ValueError as exc:
+                    raise WriteRefused(str(exc)) from exc
+            encoded[index] = self._encode(loc, value)
+        run: list[int] = []
+        for index in sorted(encoded) + [None]:
+            if run and (index is None or index != run[-1] + 1):
+                self._write_memory(loc.offset + loc.width * run[0], b"".join(encoded[i] for i in run))
+                run = []
+            if index is not None:
+                run.append(index)
+
     def set_string(self, data_id: int, text: str) -> str:
         loc = self._writable(data_id)
         if not loc.is_string or loc.width != 1:
@@ -476,8 +538,6 @@ class Ecu:
     def store(self) -> None:
         """Make live changes permanent in the ECU's flash."""
         try:
-            if self._memo_changed:
-                self.logs.write_named(p.CMD_WRITE_MEMO, (self.memo or "").encode("utf-16-le"))
             self.link.request(p.CMD_STORE, timeout=STORE_TIMEOUT)
             if self.comms:
                 self._on_comms(lambda: self.link.request(p.CMD_STORE, timeout=STORE_TIMEOUT))
@@ -491,7 +551,6 @@ class Ecu:
         self.reload()
         self.baseline = bytes(self.memory)
         self._dirty = False
-        self._memo_changed = False
 
     def is_changed(self, data_id: int, index: int = 0) -> bool:
         """Whether this differs from what was on the ECU at connecting or the last Store."""
@@ -548,7 +607,7 @@ class Ecu:
             raise WriteRefused("this ECU does not support TPS setup")
         self._require_engine_stopped(data_id)
         if ETHROTTLE_MODE_ID in self.table and self.get(ETHROTTLE_MODE_ID) not in ETHROTTLE_INACTIVE:
-            raise WriteRefused("this ECU uses an electronic throttle, which needs its own calibration")
+            raise WriteRefused("TPS must be calibrated through E-Throttle as it is enabled")
         return self.set(data_id, round(self.get(TPS_RAW_ID), 2))
 
     def calibrate_baro(self, kpa: float) -> None:
@@ -571,19 +630,27 @@ class Ecu:
         return self.memo
 
     def set_memo(self, text: str) -> None:
-        """Held here until a Store, as PCLink does."""
+        """Sent when the box is closed with Ok, as PCLink does. It reaches flash with the next Store."""
+        self.logs.write_named(p.CMD_WRITE_MEMO, text.encode("utf-16-le"))
         self.memo = text
-        self._memo_changed = True
         self._dirty = True
 
     def exception_dump(self) -> bytes:
         return self.link.request(p.CMD_EXCEPTION_DUMP, timeout=2.0)
 
-    def set_clock(self, now: time.struct_time | None = None) -> None:
-        """Set the G5 comms processor's clock from the computer's."""
+    def trap_report(self) -> str:
+        """What PCLink shows when the ECU will not connect: the exception dump, which the ECU sends as text."""
+        dump = self.exception_dump().replace(b"\0", b"").decode("latin-1")
+        return "Error: ECU has had an exception and cannot connect.\r\nPlease email the following information to tech@linkecu.com\r\n\r\n\r\n\r\n" + dump
+
+    def set_clock(self, now: time.struct_time | None = None, comms: bool = True) -> None:
+        """Set the G5 comms processor's clock from the computer's, or the main processor's with `comms` off."""
         now = now or time.localtime()
         payload = bytes(4) + struct.pack(">HBBBBBB", now.tm_year, now.tm_mon, now.tm_mday, now.tm_hour, now.tm_min, now.tm_sec, (now.tm_wday + 1) % 7 + 1)
-        self._on_comms(lambda: self.link.request(p.CMD_SET_CLOCK, payload))
+        if comms:
+            self._on_comms(lambda: self.link.request(p.CMD_SET_CLOCK, payload))
+        else:
+            self.link.request(p.CMD_SET_CLOCK, payload)
 
     def feature_unlock(self, code: str) -> None:
         """Send a dealer's 16-digit unlock code. The ECU decides whether it is right."""
@@ -596,7 +663,10 @@ class Ecu:
             words = [int(code[at : at + 4], 16) for at in (0, 4, 8, 12)]
         except ValueError:
             raise WriteRefused("The unlock code is not the correct format") from None
-        self.link.request(p.CMD_FEATURE_UNLOCK, struct.pack(">HHHH", words[1], words[0], words[3], words[2]))
+        try:
+            self.link.request(p.CMD_FEATURE_UNLOCK, struct.pack(">HHHH", words[1], words[0], words[3], words[2]))
+        except p.EcuError as exc:
+            raise WriteRefused(f"Failed to unlock the feature in the ECU with error: {exc}") from exc
 
     # ---- passwords --------------------------------------------------------
 
@@ -626,6 +696,7 @@ class Ecu:
         if MASTER_PASSWORD_ID not in self.table:
             raise WriteRefused("This ECU has no password setting.")
         self._write_password(USER_PASSWORD_ID, "")
+        self.store()
         self._write_password(MASTER_PASSWORD_ID, text)
         self._unlocked = False
         self.store()
@@ -637,72 +708,108 @@ class Ecu:
         if not temporary:
             self._write_password(USER_PASSWORD_ID, text)
             self.store()
-        self._unlocked = True
+        self._unlocked = temporary
         return True
 
     # ---- loading a map ----------------------------------------------------
 
     def load_map(self, entries, progress=None) -> int:
-        """Write a map's differing settings, as PCLink does on opening a file while connected.
+        """Write a map's settings, as PCLink does on opening a file while connected.
 
-        Two passes, since setting one value can change another's scale. Returns cells written.
+        Bulk mode on, settings in ascending id order, the same cells written once more in case one
+        changed another's scale, bulk mode off. A locked ECU is refused. Returns cells written.
         """
+        if self.is_protected:
+            raise EcuProtected("This ECU is locked with a tuner password. Unlock it before loading a map.")
         self._require_engine_stopped(p.CMD_BULK_DOWNLOAD)
+        ordered = sorted(entries, key=lambda item: item.data_id)
         self.link.request(p.CMD_BULK_DOWNLOAD, bytes([1]), 2.0)
         written = 0
         try:
-            for _ in range(2):
-                for entry in sorted(entries, key=lambda item: item.data_id):
-                    written += self._load_entry(entry)
-                if progress:
-                    progress(written)
+            writes = []
+            for entry in ordered:
+                writes += self._plan_entry(entry)
+            for write in writes:
+                write()
+            written = len(writes)
+            if progress:
+                progress(written)
+            for write in writes:
+                write()
         finally:
             self.link.request(p.CMD_BULK_DOWNLOAD, bytes([0]), 2.0)
         self._dirty = True
-        self.reload()
         return written
 
-    def _load_entry(self, entry) -> int:
+    def set_file_lock(self, locked: bool) -> None:
+        """Mark the ECU's settings as locked to a serial while an encrypted file is captured. Held in RAM only."""
+        loc = self.table.get(FILE_LOCK_ID)
+        if loc is None or not loc.is_bitfield or os.environ.get(p.READ_ONLY_ENV):
+            return
+        self._write_bits(loc, 1 if locked else 0)
+
+    def _write_bits(self, loc: Location, value: int) -> None:
+        data = (self.memory[loc.offset] & ~loc.mask & 0xFF) | ((value << loc.shift) & loc.mask)
+        self._write_memory(loc.offset, bytes([data]))
+
+    def _plan_entry(self, entry) -> list:
+        """The writes that make this ECU hold the entry's values, one per cell that differs."""
         data_id = entry.data_id
         if data_id in SECRET_IDS or data_id == 0 or data_id in self.comms:
-            return 0
+            return []
         loc = self.table.get(data_id)
         if loc is None or loc.read_only or self._is_runtime(loc):
-            return 0
+            return []
         if loc.is_string:
             if loc.width == 1 and entry.text != self.get_string(data_id):
-                self.set_string(data_id, entry.text)
-                return 1
-            return 0
-        written = 0
+                return [lambda: self.set_string(data_id, entry.text)]
+            return []
+        writes = []
         for index, value in enumerate(entry.values[: 1 if loc.is_bitfield else loc.count]):
             current = self._read_raw_number(loc, index)
             if loc.is_bitfield:
                 if int(value) != int(current):
-                    data = (self.memory[loc.offset] & ~loc.mask & 0xFF) | ((int(value) << loc.shift) & loc.mask)
-                    self._write_memory(loc.offset, bytes([data]))
-                    written += 1
+                    writes.append(lambda value=int(value): self._write_bits(loc, value))
                 continue
             encoded = self._encode(loc, value)
             at = loc.offset + loc.width * index
             if encoded != bytes(self.memory[at : at + loc.width]):
-                self._write_memory(at, encoded)
-                written += 1
-        return written
+                writes.append(lambda at=at, encoded=encoded: self._write_memory(at, encoded))
+        return writes
 
     # ---- factory settings -------------------------------------------------
 
     def restore_factory(self, sleep=time.sleep) -> None:
-        """Erase every setting on the ECU. It works on a locked ECU, as PCLink's does."""
+        """Erase every setting on the ECU. It works on a locked ECU, as PCLink's does.
+
+        PCLink's order: reset the main processor, read the settings again, then reset the comms
+        processor of a G5 and read its values. A reset that fails for any reason but a running
+        engine is tried once more, silently. The link address and timeouts are put back however it ends."""
         self._require_engine_stopped(p.CMD_FACTORY_RESET)
+        for attempt in (1, 2):
+            try:
+                self._restore_factory_once(sleep)
+                return
+            except p.EcuError as exc:
+                if exc.code == ERROR_ENGINE_RUNNING:
+                    raise WriteRefused("Reload command failed, engine may be running.") from exc
+                if attempt == 2:
+                    raise WriteRefused(f"Unable to Reload\n{exc}") from exc
+            except p.ProtocolError as exc:
+                if attempt == 2:
+                    raise WriteRefused(f"Unable to Reload\n{exc}") from exc
+
+    def _restore_factory_once(self, sleep) -> None:
+        info = self._need_info()
         self.link.request_dangerous(p.CMD_FACTORY_RESET, timeout=FACTORY_TIMEOUT)
         sleep(FACTORY_SETTLE_S)
-        if self.comms:
-            self._on_comms(lambda: self.link.request_dangerous(p.CMD_FACTORY_RESET, timeout=FACTORY_TIMEOUT))
-            sleep(FACTORY_SETTLE_S)
         self._dirty = True
         self._unlocked = False
         self.reload()
+        if info.hardware_family >= FIRST_COMMS_PRODUCT:
+            self._on_comms(lambda: self.link.request_dangerous(p.CMD_FACTORY_RESET, timeout=FACTORY_TIMEOUT))
+            sleep(FACTORY_SETTLE_S)
+            self._load_comms()
 
     # ---- G5 comms processor -----------------------------------------------
 
@@ -713,13 +820,43 @@ class Ecu:
         finally:
             self.link.addr = p.ADDR_MAIN
 
+    def _comms_info(self) -> None:
+        """What real PCLink asks the comms processor first: its versions, a stamp, and its highest id."""
+
+        def ask() -> None:
+            self.comms_boot = _version(self._info_block(p.CMD_BOOT_INFO))
+            self.comms_firmware = _version(self._info_block(p.CMD_FIRMWARE_INFO))
+            try:
+                self.link.request(p.CMD_COMMS_STAMP)
+            except p.EcuError:
+                pass
+            memory = self.link.request(p.CMD_MEMORY_INFO)
+            if len(memory) >= 0x14:
+                self._comms_top = struct.unpack_from(">H", memory, 0x12)[0]
+
+        try:
+            self._on_comms(ask)
+        except p.ProtocolError as exc:
+            log.warning("comms processor not answering: %s", exc)
+            return
+        try:
+            self.link.request(p.CMD_COMMS_STATUS)
+        except p.EcuError:
+            pass
+
+    def send_clock(self) -> None:
+        """Real PCLink sets the G5's clock from the computer's at every connect. Not sent in read-only mode."""
+        try:
+            self.set_clock()
+        except (p.ForbiddenCommand, p.EcuError) as exc:
+            log.info("G5 clock not set: %s", exc)
+
     def _load_comms(self) -> None:
         """G5 network and logging settings live on a second processor, from id 10000."""
 
         def load() -> None:
-            memory = self.link.request(p.CMD_MEMORY_INFO)
-            top = struct.unpack_from(">H", memory, 0x12)[0] if len(memory) >= 0x14 else COMMS_FIRST_ID
-            for data_id in range(COMMS_FIRST_ID, top):
+            top = self._comms_top
+            for data_id in range(COMMS_FIRST_ID, top + 1):
                 try:
                     record = self.link.request(p.CMD_COMMS_READ_RECORD, struct.pack(">H", data_id) + bytes(54))
                 except p.EcuError:
@@ -727,7 +864,7 @@ class Ecu:
                 value = CommsValue.parse(data_id, record)
                 if value is None:
                     continue
-                if value.is_array:
+                if value.is_array and not value.complete(record):
                     value.apply(self.link.request(p.CMD_COMMS_READ, struct.pack(">HH", data_id, 0xFFFF) + bytes(52)))
                 self.comms[data_id] = value
 

@@ -14,7 +14,7 @@ ENGINE_SPEED_ID = 1000
 TRIG_1_TYPE_ID, TRIG_2_TYPE_ID = 3531, 3534
 TRIG_1_ID, TRIG_2_ID, AN_VOLT_1_ID, STATE_ID = 3, 4, 1334, 1385
 DIGITAL_IDS = (1159, 1160, 2541, 2542, 2543, 2544, 3430, 3422)
-DIGITAL_NAMES = ("Trig1 Signal", "Trig2 Signal", "DI 1", "DI 2", "DI 3", "DI 4", "aux ign 1", "aux inj 1")
+DIGITAL_NAMES = ("Trig1 Signal", "Trig2 Signal", "DI 1", "DI 2", "DI 3", "DI 4", "Ign 1", "Inj 1")
 TRIGGER_SCALE = 0.028569647606382975
 ANALOG_SCALE = 0.001220703125
 TABS = {
@@ -23,6 +23,19 @@ TABS = {
     "Trigger 1 State": (TRIG_1_ID, TRIG_2_ID, AN_VOLT_1_ID, STATE_ID, 3430, 3422),
 }
 RELUCTOR = 0
+ECU_TYPE_ID = 2384
+LAYOUT, LAYOUT_M = "TSViewlayout", "TSViewlayoutM"
+
+
+def layout_name(ecu) -> str:
+    """The M variant has no Trig 1/2 volts, for the ECU types that cannot capture them."""
+    try:
+        major = int(ecu.info.firmware.split(".")[0])
+    except (AttributeError, ValueError):
+        return LAYOUT
+    if ECU_TYPE_ID in ecu.table and int(ecu.get(ECU_TYPE_ID)) in (2, 3) and major < 3:
+        return LAYOUT_M
+    return LAYOUT
 
 
 def sample_rate(rpm: float) -> int:
@@ -43,8 +56,9 @@ def decode_analog(raw: int, channel: int) -> float:
     return code * scale
 
 
-def capture(ecu, sleep=time.sleep) -> Log:
+def capture(ecu, sleep=time.sleep, caption=None) -> Log:
     """Run a capture and return it as a log, which is also how PCLink saves one."""
+    caption = caption or (lambda data_id, name: name)
     rate = sample_rate(ecu.get(ENGINE_SPEED_ID))
     link = ecu.link
 
@@ -52,7 +66,7 @@ def capture(ecu, sleep=time.sleep) -> Log:
         return link.request(p.CMD_TRIGGER_SCOPE, struct.pack(">HHH", sub, a, b), 1.0)
 
     command(START, SAMPLES, rate)
-    sleep(SAMPLES / rate)
+    sleep(SAMPLES * 1000 // rate / 1000)
     try:
         trig1 = [decode_analog(raw, READ_TRIG1) for raw in command(READ_TRIG1, SAMPLES)]
         trig2 = [decode_analog(raw, READ_TRIG2) for raw in command(READ_TRIG2, SAMPLES)]
@@ -64,24 +78,26 @@ def capture(ecu, sleep=time.sleep) -> Log:
     period = 1.0 / rate
     log = Log()
 
-    def add(data_id: int, name: str, units: str, values: list[float]) -> None:
-        log.series.append(Series(data_id, name, units, period=period, times=[i * period for i in range(len(values))], values=values))
+    def add(data_id: int, name: str, units: str, values: list[float], sparse: bool = False) -> None:
+        series = Series(data_id, caption(data_id, name), units, period=period)
+        for i, value in enumerate(values):
+            series.append(i * period, value, keep_all=not sparse)
+        log.series.append(series)
 
     def coupled(type_id: int, values: list[float]) -> tuple[str, list[float]]:
         if type_id in ecu.table and ecu.get(type_id) == RELUCTOR and values:
             mean = sum(values) / len(values)
-            return "V AC", [value - mean for value in values]
-        return "V DC", values
+            return "Volts AC", [value - mean for value in values]
+        return "Volts DC", values
 
     units, values = coupled(TRIG_1_TYPE_ID, trig1)
     add(TRIG_1_ID, "Trigger Scope 1", units, values)
     units, values = coupled(TRIG_2_TYPE_ID, trig2)
     add(TRIG_2_ID, "Trigger Scope 2", units, values)
-    add(AN_VOLT_1_ID, "AN Volt 1", "V", analog)
+    add(AN_VOLT_1_ID, "An Volt 1", "Volts", analog)
     add(STATE_ID, "Trigger 1 State", "", state)
     for bit, (data_id, name) in enumerate(zip(DIGITAL_IDS, DIGITAL_NAMES)):
-        add(data_id, name, "", [float((raw >> bit) & 1) for raw in digital])
-    log.details.update({"Name": "Trigger Scope", "Data Source": "Trigger Scope"})
+        add(data_id, name, "", [float((raw >> bit) & 1) for raw in digital], sparse=True)
     high = (SAMPLES - 1) * period
     log.markers = [Marker(KIND_SECTION, "SOL", 0.0), Marker(KIND_SECTION, "EOL", high)]
     log.rebuild()

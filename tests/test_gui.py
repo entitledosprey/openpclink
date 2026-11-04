@@ -221,7 +221,7 @@ def test_table_keys_change_only_the_selected_cells(session):
     assert editor.grid.currentItem().isSelected()
     index = 2 * 22 + 3
     before = window.worker.ecu.get(2365, index)
-    event = QtGui.QKeyEvent(QtCore.QEvent.Type.KeyPress, QtCore.Qt.Key.Key_Plus, QtCore.Qt.KeyboardModifier.NoModifier, "+")
+    event = QtGui.QKeyEvent(QtCore.QEvent.Type.KeyPress, QtCore.Qt.Key.Key_Q, QtCore.Qt.KeyboardModifier.NoModifier, "q")
     app.sendEvent(editor.grid, event)
     assert pump(app, lambda: sim.writes)
     assert len(sim.writes) == 1

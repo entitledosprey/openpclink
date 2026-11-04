@@ -288,6 +288,27 @@ class UdpTransport:
         self._sock.close()
 
 
+def discover_wifi(timeout: float = 1.0, targets: tuple[str, ...] = ("255.255.255.255",), port: int = WIFI_PORT) -> list[tuple[str, str]]:
+    """Broadcast PCLink's "Discover" and list who answers, as (address, reply text), without connecting."""
+    found: dict[str, str] = {}
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        for target in targets:
+            try:
+                sock.sendto(b"Discover", (target, port))
+            except OSError:
+                continue
+        deadline = time.monotonic() + timeout
+        while (remaining := deadline - time.monotonic()) > 0:
+            sock.settimeout(remaining)
+            try:
+                data, peer = sock.recvfrom(2048)
+            except (socket.timeout, OSError):
+                break
+            found.setdefault(peer[0], data.split(b"\0", 1)[0].decode("latin-1", "replace").strip())
+    return sorted(found.items())
+
+
 @dataclass(frozen=True)
 class PortInfo:
     """A connectable ECU location. `uri` is what open_transport() accepts."""

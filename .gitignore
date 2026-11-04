@@ -10,3 +10,13 @@ dist/
 .venv/
 __pycache__/
 *.egg-info/
+# Link's own files, however they got copied out of the installer.
+*.llf5
+*.lfp
+*.cfgr
+*.chm
+*.rtcr
+pclink-assets/
+pclink-help-images/
+pclink-*.json.gz
+pclink-rules.dll.gz

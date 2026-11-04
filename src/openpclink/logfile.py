@@ -6,9 +6,11 @@ PCLink stores them; the views use a common time axis built from them.
 from __future__ import annotations
 
 import bisect
+import collections
 import csv
 import struct
 import time
+from decimal import ROUND_HALF_UP, Decimal
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -36,6 +38,9 @@ class LogFormatError(ValueError):
     pass
 
 
+UNITS = None  # a units.UnitSystem set by the window: logs hold ECU base units and are shown converted
+
+
 @dataclass
 class Series:
     data_id: int
@@ -58,6 +63,9 @@ class Series:
             self._repeating = False
         self.times.append(when)
         self.values.append(value)
+
+    def shown(self, value: float) -> float:
+        return UNITS.to_display(value, self.unit_key) if UNITS and self.unit_key else value
 
     def value_at(self, when: float) -> float:
         """The nearest sample, as PCLink looks one up."""
@@ -106,7 +114,10 @@ class Log:
         return self._ids.get(data_id)
 
     def unit_of(self, index: int) -> str:
-        return self.series[index].units if index < len(self.series) else ""
+        if index >= len(self.series):
+            return ""
+        series = self.series[index]
+        return UNITS.label(series.unit_key) if UNITS and series.unit_key else series.units
 
     def rebuild(self) -> None:
         """Lay every channel on one time axis, at the fastest channel's rate."""
@@ -116,7 +127,7 @@ class Log:
         filled = [series for series in self.series if series.times]
         if not filled or high <= low:
             self.time = [low] if filled else []
-            self.channels = [[series.value_at(low)] if filled else [] for series in self.series]
+            self.channels = [[series.shown(series.value_at(low))] if filled else [] for series in self.series]
             return
         step = min((s.period for s in filled if s.period > 0), default=1.0)
         for series in filled:
@@ -125,7 +136,7 @@ class Log:
         count = min(int((high - low) / step) + 1 if step > 0 else 2, MAX_COMMON_POINTS)
         step = (high - low) / max(count - 1, 1)
         self.time = [low + i * step for i in range(count)]
-        self.channels = [[series.value_at(when) for when in self.time] for series in self.series]
+        self.channels = [[series.shown(series.value_at(when)) for when in self.time] for series in self.series]
 
     def time_range(self) -> tuple[float, float]:
         starts = [series.times[0] for series in self.series if series.times]
@@ -322,7 +333,8 @@ class ExportOptions:
 
 
 def _number(value: float, places: int) -> str:
-    text = f"{value:.{places}f}"
+    """Delphi's FormatFloat rounds halves away from zero, where Python rounds them to even."""
+    text = str(Decimal(value).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP))
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 
@@ -341,7 +353,7 @@ def export_csv(log: Log, path: Path, options: ExportOptions | None = None) -> No
 
     label("Name", log.details.get("Name", ""))
     if options.file_information:
-        label("FileName", log.path.name if log.path else "")
+        label("FileName", str(log.path) if log.path else "")
         for name in ("Download Date", "Download Time"):
             label(name, log.details.get(name, ""))
     if options.driver_information:
@@ -418,10 +430,26 @@ def save_log(log: Log, path: Path) -> None:
         save_link_log(log, path)
 
 
+class SampleHistory:
+    """PCLink's online sample history: the last few values of each logged id, kept while connected."""
+
+    def __init__(self, ids: list[int], size: int) -> None:
+        self.ids = list(ids)
+        self.samples: collections.deque = collections.deque(maxlen=max(int(size), 1))
+
+    def add(self, read) -> None:
+        self.samples.append((time.monotonic(), tuple(read(data_id) for data_id in self.ids)))
+
+    def snapshot(self) -> list[tuple[float, dict[int, float]]]:
+        """The samples with times before now, so a log that starts now has them at negative time."""
+        now = time.monotonic()
+        return [(when - now, dict(zip(self.ids, values))) for when, values in self.samples]
+
+
 class PcLogger:
     """Records live values. Nothing reaches disk until it is saved, as in PCLink."""
 
-    def __init__(self, path: Path | None, channels: list[tuple[int, str]], units: list[str] | None = None, period: float = 0.0, keep_all: bool = False) -> None:
+    def __init__(self, path: Path | None, channels: list[tuple[int, str]], units: list[str] | None = None, period: float = 0.0, keep_all: bool = False, history: list[tuple[float, dict[int, float]]] | None = None) -> None:
         self.channels = channels
         self.path = Path(path) if path else None
         self.period = period
@@ -433,6 +461,13 @@ class PcLogger:
         self._start = time.monotonic()
         self._last = -1e9
         self.samples = 0
+        self.history_start: float | None = None
+        for when, values in history or []:
+            for series in self.log.series:
+                if series.data_id in values:
+                    series.append(when, values[series.data_id], keep_all)
+            if self.history_start is None:
+                self.history_start = when
 
     def sample(self, read) -> None:
         """`read(data_id)` returns the current value."""
@@ -453,6 +488,9 @@ class PcLogger:
                 if len(series.times) > 1:
                     series.period = (series.times[-1] - series.times[0]) / (len(series.times) - 1) or series.period
         low, high = self.log.time_range()
+        if self.history_start is not None:
+            self.log.add_marker(Marker(KIND_SECTION, "History", low))
+            low = 0.0
         self.log.add_marker(Marker(KIND_SECTION, "PC Logged Data", low))
         self.log.add_marker(Marker(KIND_SECTION, "EOL", high))
         self.log.details.setdefault("Name", "PC Datalog - " + time.strftime("%Y-%m-%d %H;%M;%S"))

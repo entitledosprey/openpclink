@@ -175,13 +175,13 @@ def test_listing_and_downloading_ecu_logs(live):
     assert [name for name, _ in sim.ecu_logs] == ["LOG2"]
 
 
-def test_memo_is_read_lazily_and_written_only_on_store(live):
+def test_memo_is_read_lazily_and_sent_when_set(live):
     sim, ecu = live
     assert p.CMD_FILE not in sim.log
     sim.memo = "Hello"
     assert ecu.read_memo() == "Hello"
     ecu.set_memo("New note")
-    assert sim.memo == "Hello"
+    assert sim.memo == "New note"
     assert ecu.has_unstored_changes
     ecu.store()
     assert sim.memo == "New note"
@@ -212,7 +212,7 @@ def test_password_round_trip_with_temporary_and_permanent_unlock(live):
     if 2294 not in ecu.table:
         pytest.skip("this simulated ECU has no password settings")
     ecu.set_password("secret")
-    assert sim.flash_stored == 1
+    assert sim.flash_stored == 2
     assert ecu.is_protected
     with pytest.raises(EcuProtected):
         ecu.get(ecu.table and next(i for i in ecu.table if i not in (2294, 2295, 2303, 2324) and not ecu._is_runtime(ecu.table[i])))
@@ -224,7 +224,7 @@ def test_password_round_trip_with_temporary_and_permanent_unlock(live):
     assert len(sim.writes) == writes
     ecu._unlocked = False
     assert ecu.unlock("secret")
-    assert sim.flash_stored == 2
+    assert sim.flash_stored == 3
 
 
 def test_passwords_are_refused_when_too_short_or_long(live):
@@ -266,7 +266,7 @@ def test_factory_reset_needs_the_dedicated_path_and_a_stopped_engine(live):
     sim._tick()
     ecu.poll_runtime()
     ecu.restore_factory(sleep=lambda _s: None)
-    assert sim.factory_resets == 1
+    assert sim.factory_resets == 2  # main, then the G5's comms processor (product 1012 or later)
 
 
 def test_read_only_mode_blocks_every_dangerous_and_new_writing_command(live, monkeypatch):
@@ -293,7 +293,8 @@ def test_read_only_mode_blocks_every_dangerous_and_new_writing_command(live, mon
 
 def test_connecting_sends_only_the_commands_it_always_has(live):
     sim, _ecu = live
-    assert set(sim.log) <= {p.CMD_STATE, p.CMD_BOOT_INFO, p.CMD_FIRMWARE_INFO, p.CMD_IDENTITY, p.CMD_MEMORY_INFO, p.CMD_READ_DESCRIPTOR, p.CMD_READ_CONFIG, p.CMD_READ_SECTION2, p.CMD_POLL_RUNTIME}
+    assert set(sim.log) <= {p.CMD_STATE, p.CMD_BOOT_INFO, p.CMD_FIRMWARE_INFO, p.CMD_IDENTITY, p.CMD_MEMORY_INFO, p.CMD_READ_DESCRIPTOR, p.CMD_READ_CONFIG, p.CMD_READ_SECTION2, p.CMD_POLL_RUNTIME,
+                          p.CMD_COMMS_STAMP, p.CMD_COMMS_STATUS}  # the last two only a G5 sends, to its comms processor
 
 
 def test_undo_short_term_changes_restores_the_ecu(live):

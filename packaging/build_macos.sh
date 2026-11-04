@@ -11,6 +11,7 @@ libusb="$(brew --prefix libusb)/lib/libusb-1.0.0.dylib"
 [ -f "$libusb" ] || { echo "run: brew install libusb"; exit 1; }
 source packaging/common.sh
 bake_and_freeze "$1" --windowed --osx-bundle-identifier org.openpclink.app --add-binary "$libusb:."
+verify_build dist/OpenPCLink.app/Contents/MacOS/OpenPCLink
 version=$(python -c 'import openpclink;print(openpclink.__version__)')
 arch=$(uname -m)
 staging=$(mktemp -d)

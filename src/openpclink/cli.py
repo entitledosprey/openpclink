@@ -74,6 +74,33 @@ def cmd_import(args: argparse.Namespace) -> None:
     print(f"Imported PCLink data to {import_pclink(Path(args.source))}")
 
 
+def cmd_check(args: argparse.Namespace) -> None:
+    from . import assets
+    from .importer import bundled_db_path, default_db_path, rules_table_path
+
+    where = bundled_db_path() if args.bundled or not default_db_path().exists() else default_db_path()
+    if where is None:
+        raise CliError("no PCLink data found")
+    database = Database.load(where if args.bundled else None)
+    print(f"Data:      {where}")
+    layouts = assets.asset("Layouts")
+    print(f"Layouts:   {len(list(layouts.glob('*.llf5'))) if layouts else 0}")
+    print(f"Firmware:  {'yes' if assets.asset('Firmware') else 'missing'}")
+    from .database import HelpManual
+
+    print(f"Help:      {len(HelpManual().pages)} pages, {len(HelpManual.image_folders())} image folder(s)")
+    print(f"Rules:     {'yes' if rules_table_path() else 'missing'}")
+    import importlib.util
+
+    shipped = [name for name in ("openpclink.rules", "unicorn", "pefile") if importlib.util.find_spec(name)]
+    print(f"Emulator:  {'present: ' + ', '.join(shipped) if shipped else 'not included'}")
+    gaps = assets.data_gaps(database)
+    for gap in gaps:
+        print(f"Missing:   {gap}")
+    if gaps:
+        raise CliError("this data was imported by an older OpenPCLink; run 'openpclink import <PCLink installer or folder>' again")
+
+
 def cmd_ports(args: argparse.Namespace) -> None:
     ports = list_ports(all_serial=args.all)
     if not ports:
@@ -206,6 +233,8 @@ def build_parser() -> argparse.ArgumentParser:
         return sub
 
     add("import", cmd_import, "import data from your PCLink installer", False).add_argument("source")
+    check = add("check", cmd_check, "check the imported PCLink data is complete", False)
+    check.add_argument("--bundled", action="store_true", help="check the data baked into this build, not your imported copy")
     add("ports", cmd_ports, "list connected ECUs", False).add_argument("--all", action="store_true")
     add("info", cmd_info, "show ECU information")
     add("search", cmd_search, "find parameters by name", False).add_argument("text")

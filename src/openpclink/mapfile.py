@@ -1,13 +1,14 @@
 """PCLink map files (.pclx, .pcl5): read, write, compare, and edit offline."""
 from __future__ import annotations
 
+import struct
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import crypto
 from .database import Database
-from .ecu import MASTER_PASSWORD_ID, SECRET_IDS, USER_PASSWORD_ID, Ecu, EcuInfo, EcuProtected, WriteRefused
+from .ecu import FILE_LOCK_ID, MASTER_PASSWORD_ID, SECRET_IDS, USER_PASSWORD_ID, WIFI_PASSWORD_ID, Ecu, EcuInfo, EcuProtected, WriteRefused
 from .layout import Location, TYPE_ARRAY, TYPE_STRING, TYPES_BITFIELD
 
 _RUNTIME_MARKER = 0
@@ -19,8 +20,30 @@ class MapError(Exception):
     pass
 
 
+def _single(value: float) -> float:
+    """PCLink holds values as 32-bit floats, so the file does too."""
+    try:
+        return struct.unpack(">f", struct.pack(">f", value))[0]
+    except (OverflowError, struct.error):
+        return value
+
+
+def _memo_of(ecu: Ecu) -> str:
+    try:
+        return ecu.read_memo()
+    except Exception:
+        return ecu.memo or ""
+
+
 def _number_text(value: float) -> str:
-    return f"{int(value)}" if float(value).is_integer() else f"{value:.15g}"
+    if float(value).is_integer():
+        return f"{int(value)}"
+    single = _single(value)
+    for digits in range(1, 10):
+        text = f"{single:.{digits}g}"
+        if _single(float(text)) == single:
+            return text
+    return f"{value:.15g}"
 
 
 @dataclass
@@ -89,14 +112,14 @@ class MapFile:
             "Firmware": ("3", info.firmware),
             "Bootcode": ("3", info.boot),
             "HWRevision": ("3", ""),
-            "CommsFirmware": ("3", ""),
-            "CommsBootcode": ("3", ""),
+            "CommsFirmware": ("3", getattr(ecu, "comms_firmware", "")),
+            "CommsBootcode": ("3", getattr(ecu, "comms_boot", "")),
             "CommsHWRevision": ("3", ""),
             "ECUMinSpec": ("3", f"{major[0]}:{major[1]}"),
             "LinkID": ("1", str(info.link_id)),
             "SerialNumber": ("1", str(info.serial)),
             "MaxID": ("1", str(info.max_id)),
-            "Memo": ("3", ""),
+            "Memo": ("3", _memo_of(ecu)),
         }
         entries = {}
         for data_id, loc in sorted(ecu.table.items()):
@@ -107,8 +130,12 @@ class MapFile:
                 values, text = [ecu._read_raw_number(loc, i) for i in range(loc.count)], ""
             elif data_id in (MASTER_PASSWORD_ID, USER_PASSWORD_ID):
                 values, text = [0.0] * loc.count, ""
+            elif data_id == FILE_LOCK_ID and keep_lock:
+                values, text = [1.0], ""
             elif data_id in SECRET_IDS:
                 values, text = [0.0], ""
+            elif data_id == WIFI_PASSWORD_ID:
+                values, text = [], "*" * 12
             elif loc.is_string and loc.width == 1:
                 values, text = [], ecu.get_string(data_id)
             elif loc.is_bitfield:
@@ -127,6 +154,14 @@ class MapFile:
             )
         return cls(memory, entries)
 
+    def locked_copy(self) -> "MapFile":
+        """A copy marked as locked to an ECU, for Save as Encrypted. This map is left as it was."""
+        copy = MapFile.parse(self.to_xml())
+        entry = copy.entries.get(FILE_LOCK_ID)
+        if entry is not None:
+            entry.values = [1.0]
+        return copy
+
     def to_xml(self) -> bytes:
         lines = ['<?xml version="1.0"?>', f'<LinkStorage Version="{_FORMAT_VERSION}" Type=".xml">', "\t<Memory>"]
         for tag, (kind, value) in self.memory.items():
@@ -134,7 +169,7 @@ class MapFile:
         lines += ["\t</Memory>", "\t<Map>"]
         for data_id, entry in sorted(self.entries.items()):
             flags = (
-                f'Count="{entry.count}" Multi="{entry.multi:.15g}" Offset="{entry.offset:.15g}" '
+                f'Count="{entry.count}" Multi="{_single(entry.multi):.15g}" Offset="{_single(entry.offset):.15g}" '
                 f'ReadOnly="{str(entry.read_only).lower()}" CanWriteable="{str(entry.can_writeable).lower()}"'
             )
             if entry.kind == TYPE_ARRAY or entry.rows is not None:
@@ -254,6 +289,10 @@ class OfflineEcu:
         entry.values[index] = float(value)
         self._dirty = True
         return entry.values[index]
+
+    def set_cells(self, data_id: int, cells: dict[int, float]) -> None:
+        for index, value in cells.items():
+            self.set(data_id, value, index)
 
     def set_string(self, data_id: int, text: str) -> str:
         entry = self._entry(data_id)

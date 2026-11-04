@@ -7,10 +7,22 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from PySide6 import QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from .importer import default_db_path
-from .units import CHOICES, DEFAULT_IMPERIAL, DEFAULT_METRIC, GROUP_TITLES
+from .units import BIG_PRESSURE, CHOICES, DEFAULT_IMPERIAL, DEFAULT_METRIC, DISTANCE, GROUP_TITLES, LAMBDA, PRESSURE, SPEED, TEMPERATURE
+
+
+BAUD_RATES = ["19200", "38400", "57600", "115200"]
+
+
+def _serial_ports() -> list[str]:
+    try:
+        from serial.tools import list_ports
+
+        return [port.device for port in sorted(list_ports.comports(), key=lambda p: p.device)]
+    except ImportError:
+        return []
 
 
 def default_options_path() -> Path:
@@ -43,12 +55,15 @@ class Options:
     themes: dict = field(default_factory=dict)
     language: str = "English"
     connection_manual: bool = False
-    connection_port: str = ""
-    baud_rate: int = 38400
+    connection_port: str = "Auto"
+    baud_rate: int = 38400  # as listed in the Connection tab
     slow_connection: bool = False
     log_settings: dict = field(default_factory=dict)
     recent_layout: str = ""
+    recent_logging_layout: str = ""
     recent_map: str = ""
+    last_dirs: dict = field(default_factory=dict)
+    quick_tune: dict = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Options":
@@ -65,14 +80,38 @@ class Options:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(asdict(self), indent=1), encoding="utf-8")
 
+    def connection_uri(self, ports: list) -> str:
+        """Where F3 and Search for ECU connect: the first ECU found, or the port chosen in Manual mode."""
+        chosen = self.connection_port if self.connection_manual else "Auto"
+        if chosen in ("", "Auto"):
+            return ports[0].uri if ports else ""
+        if chosen == "Network":
+            return "udp:192.168.4.1"
+        if chosen == "USB":
+            return next((port.uri for port in ports if not port.uri.startswith("udp:")), "")
+        uri = chosen if ":" in chosen and not chosen[1:3] == ":\\" else f"serial:{chosen}"
+        if uri.startswith("serial:") and "@" not in uri:
+            uri += f"@{self.baud_rate}"
+        return uri
+
     def unit_choice(self) -> dict[str, str]:
         return self.imperial if self.system == "Imperial" else self.metric
 
     def folder(self, kind: str) -> str:
-        """The folder a file dialog opens in. Empty when the option is off."""
-        if not getattr(self, f"use_{kind}_dir"):
-            return ""
-        return getattr(self, f"{kind}_dir") or str(documents_dir() / {"map": "Maps", "log": "Logs", "layout": "Layouts"}[kind])
+        """The folder a file dialog opens in: the chosen one, or the last one used when 'Use this directory' is off."""
+        default = getattr(self, f"{kind}_dir") or str(documents_dir() / {"map": "Maps", "log": "Logs", "layout": "Layouts"}[kind])
+        if getattr(self, f"use_{kind}_dir"):
+            return default
+        return self.last_dirs.get(kind) or default
+
+    def remember(self, kind: str, path: str) -> None:
+        self.last_dirs[kind] = str(Path(path).parent)
+
+
+_UNIT_CELLS = {
+    PRESSURE: (0, 0, 1, 1), DISTANCE: (0, 1, 1, 1), LAMBDA: (0, 2, 1, 1), BIG_PRESSURE: (0, 3, 2, 1),
+    TEMPERATURE: (1, 0, 1, 2), SPEED: (1, 2, 1, 1),
+}
 
 
 class _UnitsTable(QtWidgets.QGroupBox):
@@ -91,7 +130,7 @@ class _UnitsTable(QtWidgets.QGroupBox):
                 button.setChecked(choice.get(group) == name)
                 column.addWidget(button)
                 self.buttons[group][name] = button
-            grid.addWidget(box, at // 3, at % 3)
+            grid.addWidget(box, *_UNIT_CELLS[group])
 
     def value(self) -> dict[str, str]:
         return {group: next((name for name, button in row.items() if button.isChecked()), "") for group, row in self.buttons.items()}
@@ -111,12 +150,19 @@ class OptionsDialog(QtWidgets.QDialog):
         self.tabs.addTab(self._preferences_tab(), "Preferences")
         self.tabs.addTab(self._units_tab(), "Units")
         self.tabs.addTab(self._directories_tab(), "Directories")
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        button = QtWidgets.QDialogButtonBox.StandardButton
+        buttons = QtWidgets.QDialogButtonBox(button.Help | button.Ok | button.Cancel)
+        buttons.helpRequested.connect(self._help)
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
         column = QtWidgets.QVBoxLayout(self)
         column.addWidget(self.tabs)
         column.addWidget(buttons)
+
+    def _help(self) -> None:
+        show = getattr(self.parent(), "show_topic", None)
+        if show:
+            show("options")
 
     def show_tab(self, name: str) -> None:
         self.tabs.setCurrentIndex(self.TABS.index(name))
@@ -131,16 +177,23 @@ class OptionsDialog(QtWidgets.QDialog):
         row = QtWidgets.QVBoxLayout(mode)
         row.addWidget(self.mode_manual)
         row.addWidget(self.mode_auto)
-        self.port = QtWidgets.QLineEdit(self.options.connection_port)
-        self.port.setPlaceholderText("Auto, or serial:/dev/x, ftdi:7068, udp:192.168.4.1")
+        self.port = QtWidgets.QComboBox()
+        self.port.addItems(["Auto", "USB", "Network"])
+        for port in _serial_ports():
+            self.port.addItem(port)
+        if self.port.findText(self.options.connection_port) < 0:
+            self.port.addItem(self.options.connection_port)
+        self.port.setCurrentText(self.options.connection_port or "Auto")
         self.baud = QtWidgets.QComboBox()
-        self.baud.addItems(["9600", "19200", "38400", "57600", "115200"])
+        self.baud.addItems(BAUD_RATES)
         self.baud.setCurrentText(str(self.options.baud_rate))
         self.slow = QtWidgets.QCheckBox("Slow Connection")
         self.slow.setChecked(self.options.slow_connection)
         form.addRow(mode)
-        form.addRow("Connection Port", self.port)
-        form.addRow("Baud Rate", self.baud)
+        form.addRow(QtWidgets.QLabel("Connection Port"))
+        form.addRow(self.port)
+        form.addRow(QtWidgets.QLabel("Baud Rate"))
+        form.addRow(self.baud)
         form.addRow(self.slow)
         return page
 
@@ -171,6 +224,7 @@ class OptionsDialog(QtWidgets.QDialog):
         inner = QtWidgets.QVBoxLayout(box)
         button = QtWidgets.QPushButton("Font")
         sample = QtWidgets.QLabel("Sample 123")
+        sample.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         if getattr(self, attribute):
             font = QtGui.QFont()
             font.fromString(getattr(self, attribute))
@@ -207,7 +261,7 @@ class OptionsDialog(QtWidgets.QDialog):
             use = QtWidgets.QCheckBox("Use this directory")
             use.setChecked(getattr(self.options, f"use_{kind}_dir"))
             path = QtWidgets.QLineEdit(self.options.folder(kind) or getattr(self.options, f"{kind}_dir"))
-            browse = QtWidgets.QPushButton("…")
+            browse = QtWidgets.QPushButton("...")
             browse.clicked.connect(lambda _checked=False, edit=path: self._browse(edit))
             inner.addWidget(use, 0, 0, 1, 2)
             inner.addWidget(path, 1, 0)
@@ -225,7 +279,7 @@ class OptionsDialog(QtWidgets.QDialog):
     def _accept(self) -> None:
         o = self.options
         o.connection_manual = self.mode_manual.isChecked()
-        o.connection_port = self.port.text().strip()
+        o.connection_port = self.port.currentText().strip()
         o.baud_rate = int(self.baud.currentText())
         o.slow_connection = self.slow.isChecked()
         o.start_full_screen = self.full_screen.isChecked()

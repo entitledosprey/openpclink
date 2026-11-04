@@ -11,6 +11,7 @@ docker run --rm --platform "linux/$arch" -v "$PWD:/repo:ro" -v "$PWD/dist:/out" 
     pip -q install -e '.[dev]' 2>&1 | grep -v 'WARNING' || true
     source packaging/common.sh
     bake_and_freeze '/repo/$source_path' --add-binary \"\$(ls /usr/lib/*/libusb-1.0.so.0):.\"
+    verify_build dist/OpenPCLink/OpenPCLink
     version=\$(python -c 'import openpclink;print(openpclink.__version__)')
     root=/tmp/deb; mkdir -p \$root/DEBIAN \$root/opt \$root/usr/bin \$root/usr/share/applications \$root/usr/lib/udev/rules.d
     cp -r dist/OpenPCLink \$root/opt/openpclink

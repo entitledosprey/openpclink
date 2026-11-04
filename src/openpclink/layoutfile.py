@@ -11,7 +11,13 @@ class LayoutError(Exception):
     pass
 
 
-GROUP_ALL = 0  # The ids a view shows unless a table with its own group has focus.
+GROUP_ALL = 0  # The ids a view always shows; a focused table's own group is shown after them.
+# Names PCLink's view factory (FUN_005dd378) also accepts, and what they mean.
+TYPE_ALIASES = {
+    "TPPanel": "Auto Settings", "BarGauge": "Bar Gauge", "CurvedBar": "Curved Bar", "DialGauge": "Dial Gauge",
+    "TargetGauge": "Target Gauge", "Digital": "Digital Gauge", "RuntimeValueList": "Runtime Value List",
+    "ParameterList": "Parameter List", "ValueList": "Value List", "MixtureMap": "Mixture Map", "HelpBrowser": "Help Browser",
+}
 
 
 @dataclass
@@ -39,8 +45,9 @@ class LayoutView:
             except ValueError:
                 return default
 
+        kind = node.get("Type", "")
         view = cls(
-            type=node.get("Type", ""), left=number("Left"), top=number("Top"), width=number("Width", 300),
+            type=TYPE_ALIASES.get(kind, kind), left=number("Left"), top=number("Top"), width=number("Width", 300),
             height=number("Height", 200), locked=node.get("Locked") == "true", font_size=number("FontSize"),
             guid=node.get("Guid", ""),
             attributes={k: v for k, v in node.attrib.items() if k not in cls._FIXED},
@@ -48,10 +55,10 @@ class LayoutView:
         for child in node:
             if child.tag == "DataIDGroups":
                 for group in child:
-                    ids = [int(i) for i in group.get("DataIDs", "").split(",") if i.strip().isdigit()]
-                    view.groups[int(group.get("GroupID", "0"))] = ids
+                    ids = [int(i) for i in group.get("DataIDs", "").split(",") if i.strip().lstrip("-").isdigit()]
+                    view.groups[_whole(group.get("GroupID", "0"))] = ids
             elif child.tag == "LogParameterViewInfos":
-                view.log_parameters = [(int(i.get("DataID", "0")), int(i.get("DisplayGroup", "0"))) for i in child]
+                view.log_parameters = [(_whole(i.get("DataID", "0")), _whole(i.get("DisplayGroup", "0"))) for i in child]
             else:
                 view.extra.append(child)
         return view
@@ -74,9 +81,10 @@ class LayoutView:
         return node
 
     def ids_for(self, table_id: int | None = None) -> list[int]:
-        if table_id in self.groups:
-            return self.groups[table_id]
-        return self.groups.get(GROUP_ALL, [])
+        always = self.groups.get(GROUP_ALL, [])
+        if table_id and table_id != GROUP_ALL and table_id in self.groups:
+            return always + [data_id for data_id in self.groups[table_id] if data_id not in always]
+        return always
 
     def part(self, tag: str) -> ET.Element | None:
         return next((node for node in self.extra if node.tag == tag), None)
@@ -101,6 +109,7 @@ class LayoutPage:
 class Layout:
     pages: list[LayoutPage] = field(default_factory=list)
     selected: str = ""
+    root_type: str = ".llf"
 
     @classmethod
     def parse(cls, text: str | bytes) -> "Layout":
@@ -111,13 +120,13 @@ class Layout:
         node = root.find("ViewLayout/Pages")
         if node is None:
             raise LayoutError("not a layout file: it has no pages")
-        layout = cls(selected=node.get("SelectedPage", ""))
+        layout = cls(selected=node.get("SelectedPage", ""), root_type=root.get("Type", ".llf"))
         for page_node in node.findall("Page"):
             views = page_node.find("Views")
             layout.pages.append(LayoutPage(
                 name=page_node.get("Name", "Page"),
                 name_string=page_node.get("NameStrId", ""),
-                current_table=int(page_node.get("CurrentTableDataID", "0") or 0),
+                current_table=_whole(page_node.get("CurrentTableDataID", "0")),
                 current_settings_view=page_node.get("CurrentSettingsView", ""),
                 views=[LayoutView.from_element(view) for view in (views if views is not None else [])],
             ))
@@ -131,12 +140,13 @@ class Layout:
             raise LayoutError(str(exc)) from exc
 
     def to_xml(self) -> bytes:
-        root = ET.Element("LinkStorage", {"Version": "100", "Type": ".llf"})
+        root = ET.Element("LinkStorage", {"Version": "100", "Type": self.root_type})
         pages = ET.SubElement(ET.SubElement(root, "ViewLayout"), "Pages", {"SelectedPage": self.selected})
         for page in self.pages:
-            attributes = {"Name": page.name, "CurrentTableDataID": str(page.current_table), "CurrentSettingsView": page.current_settings_view}
-            if page.name_string:
-                attributes["NameStrId"] = page.name_string
+            attributes = {
+                "Name": page.name, "NameStrId": page.name_string or "0", "CurrentTableDataID": str(page.current_table),
+                "CurrentSettingsView": page.current_settings_view or "{00000000-0000-0000-0000-000000000000}",
+            }
             page_node = ET.SubElement(pages, "Page", attributes)
             views = ET.SubElement(page_node, "Views")
             views.extend(view.to_element() for view in page.views)
@@ -148,6 +158,13 @@ class Layout:
 
     def page(self, name: str) -> LayoutPage | None:
         return next((page for page in self.pages if page.name == name), None)
+
+
+def _whole(text: str | None) -> int:
+    try:
+        return int(float(text or 0))
+    except ValueError:
+        return 0
 
 
 def new_guid() -> str:

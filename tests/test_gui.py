@@ -420,6 +420,7 @@ def test_tps_setup_saves_the_voltage_rounded_as_pclink_writes_it(session):
         sim.memory[mode.offset] &= ~mode.mask & 0xFF
         window.worker.post("control", lambda e: e.reload(), "")
     _set_raw(sim, ecu.table[TPS_RAW_ID], 1444)  # PCLink wrote 0x05A0 when this read 1.444 V.
+    assert pump(app, lambda: ecu.get(1000) == 0)
     sim.writes.clear()
     with mock.patch.object(QtWidgets.QMessageBox, "information", return_value=QtWidgets.QMessageBox.StandardButton.Ok):
         window.tps_setup()
@@ -432,21 +433,29 @@ def test_tps_setup_saves_the_voltage_rounded_as_pclink_writes_it(session):
 def test_tps_setup_and_map_calibration_refuse_while_the_engine_runs(session):
     app, window, sim = session
     sim.engine_running = True
+    assert pump(app, lambda: window.worker.ecu.get(1000) > 0)
     before = sim.map_calibrations
     sim.writes.clear()
-    failures = []
-    window.worker.failed.connect(failures.append)
+    window.errors.clear()
     with (
         mock.patch.object(QtWidgets.QMessageBox, "information", return_value=QtWidgets.QMessageBox.StandardButton.Ok),
         mock.patch.object(QtWidgets.QMessageBox, "question", return_value=QtWidgets.QMessageBox.StandardButton.Yes),
-        mock.patch.object(QtWidgets.QMessageBox, "warning"),
+        mock.patch.object(QtWidgets.QMessageBox, "warning") as warning,
     ):
         window.tps_setup()
+        assert warning.call_count == 1
         window.calibrate_map()
-        assert pump(app, lambda: len(failures) == 3), failures
+        assert pump(app, lambda: window.errors), "the MAP calibration should have been refused"
     assert sim.map_calibrations == before and sim.writes == []
-    window.worker.failed.disconnect(failures.append)
+    window.errors.clear()
     sim.engine_running = False
-    with mock.patch.object(QtWidgets.QMessageBox, "question", return_value=QtWidgets.QMessageBox.StandardButton.Yes):
+    assert pump(app, lambda: window.worker.ecu.get(1000) == 0)
+    with (
+        mock.patch.object(QtWidgets.QMessageBox, "question", return_value=QtWidgets.QMessageBox.StandardButton.Yes),
+        mock.patch.object(QtWidgets.QMessageBox, "information"),
+    ):
         window.calibrate_map()
-    assert pump(app, lambda: sim.map_calibrations == before + 1)
+        assert pump(app, lambda: sim.map_calibrations == before + 1)
+        app.processEvents()
+        time.sleep(0.2)
+        app.processEvents()

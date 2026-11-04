@@ -1,91 +1,72 @@
 # Feature parity with PCLink 7.8.2
 
-Taken from the real program's menus, source modules and strings. Status means what exists here, and how it was checked:
-**car** = on the real ECU, **PCLink** = compared with real PCLink under Wine, **sim** = simulator or tests only.
+Every item in real PCLink's menus now exists here. That is not the same as proven. The tables say how each area was checked:
 
-## Real PCLink's menus, item by item
+- **Bytes**: the frames or file bytes were compared with real PCLink under Wine, against the simulator.
+- **Numbers**: decoded results or displayed figures were compared with real PCLink.
+- **Look**: compared by eye with real PCLink or its manual's pictures.
+- **Sim**: run against the simulator and tests only, so it rests on the decoded code.
 
-Read from real PCLink 7.8.2 under Wine. ✅ exists here, 🟡 partial, ❌ missing. A tick says it exists, not that it has run on a real ECU; the sections below say how each was checked.
+**Nothing added since v0.4.0 has run on a real ECU.** Only reading a G4X, and one reverted label change on v0.2.0, have. The simulator encodes this project's reading of the protocol.
+
+## Menus
 
 | Menu | Items |
 |---|---|
-| File | ✅ Open, ❌ Save, ✅ Save as, ❌ Save as Encrypted, ✅ Compare, ❌ Compare Close, ❌ Show Memo, ❌ Exit |
-| Options | 🟡 Connection, ❌ Preferences, ❌ Directories, ❌ Colour Theme, ❌ Units, ❌ Language, ❌ Setup ECU Parameters |
-| ECU Controls | ✅ Disconnect, ✅ Search, ❌ Update Firmware, ✅ Clear Fault Codes, ❌ ECU Log File Setup, ❌ ECU Log File Download, ❌ CAN Setup, ✅ Show Statistics, ✅ Clear Statistics, ✅ Store, ❌ ECU Unlock, ❌ Restore to Factory Settings, ❌ Setup Password, ❌ Unlock Password, 🟡 TPS Setup (no electronic throttle), ✅ MAP Sensor Calibration, ❌ Trigger Scope |
-| Display Mode | ✅ ECU, 🟡 Log Analysis, ❌ Full Screen with Menus, ❌ Full Screen |
-| Layout | ❌ New, ❌ Load, ❌ Save As, ❌ New Page, ❌ Delete Page, ❌ Rename Page, ❌ Configuration, ❌ Tuning, ❌ Logging, ❌ Mixture Map |
-| View | ✅ ECU Settings, ❌ Log File Manager, ✅ Parameters, ❌ Event Log, ❌ Digital Gauge, ❌ Bar Gauge, ❌ Curve Gauge, ✅ Dial Gauge, ❌ Target Gauge, ✅ Runtime Value List, 🟡 Help Browser, ❌ Vehicle Plan |
-| Logging | 🟡 Open Log File, ❌ Save Log File, ❌ Save As, ❌ Save All, ❌ Close, ❌ Close All, ❌ Log File Details, ❌ Export, ❌ Play, ✅ Record, ✅ Stop, ❌ Setup Logging, ❌ ECU Log File Download, ❌ Navigator, ✅ Time Plot, ❌ Logged Values List, 🟡 XY Plot, ❌ Vehicle Plan, ❌ Parameter List, 🟡 Histogram, ❌ Statistics, ❌ GPS Plot |
-| Tuning | ✅ Runtime Values, ❌ Quick Tune, ❌ Mixture Map, ❌ Knock Audio, ❌ Reset Tuning Markers, ❌ Undo Short Term Changes |
-| Help | ✅ Contents, ❌ Keyboard Shortcuts, ❌ Wiring Information, ❌ ECU Fault Codes, ❌ ECU Information, ❌ About |
+| File | Open, Save, Save as, Save as Encrypted, Compare, Compare Close, Show Memo, Exit |
+| Options | Connection, Preferences, Directories, Colour Theme, Units, Language (English is all that ships), Setup ECU Parameters |
+| ECU Controls | Connect, Search, Update Firmware, Clear Fault Codes, ECU Log File Setup and Download, CAN Setup, Statistics, Store, ECU Unlock, Restore to Factory Settings, Setup and Unlock Password, TPS Setup, MAP Calibration, Trigger Scope |
+| Display Mode | ECU, Log Analysis, Full Screen with Menus, Full Screen |
+| Layout | New, Load, Save As, New, Delete and Rename Page, page list |
+| View | ECU Settings, Log File Manager, Parameters, Event Log, Digital, Bar, Curve, Dial and Target Gauge, Runtime Value List, Help Browser, Vehicle Plan |
+| Logging | Open, Save, Save As, Save All, Close, Close All, Details, Export, Play, Record, Stop, Setup, ECU Download, Navigator, Time Plot, Logged Values, XY Plot, Vehicle Plan, Parameter List, Histogram, Statistics, GPS Plot |
+| Tuning | Runtime Values, Quick Tune, Mixture Map, Knock Audio, Reset Tuning Markers, Undo Short Term Changes |
+| Help | Contents, Keyboard Shortcuts, Wiring Information, ECU Fault Codes, ECU Information, About |
 
-## ECU controls
+Extra here, not in PCLink's menus: Baro Calibration, APS and E-Throttle Calibration (PCLink reaches these from settings), Back Up Settings.
 
-| Feature | Status |
-|---|---|
-| Connect, disconnect, search (G4X USB) | Done: car |
-| Connect (G5 USB, serial, WiFi, WiFi selection) | Built: sim only; WiFi selection missing |
-| Change settings live | Done: car (text, number); sim and PCLink bytes (option, table) |
-| Store to ECU | Built: PCLink capture; not run on the car |
-| Undo Short Term Changes, Load from ECU, Download to ECU | Missing |
-| ECU status and fault codes window | Done: sim |
-| Fault code in the status bar | Done: sim |
-| Clear Fault Codes, Clear Statistics | Built: commands captured from PCLink; not run on the car |
-| Update Statistics | Missing |
-| ECU log setup and download | Missing |
-| CAN setup dialog, CAN device, keypad and lambda forms | Missing (settings are in the menus) |
-| TPS setup (non-electronic throttle), MAP sensor calibration | Built: commands captured from PCLink; not run on the car |
-| E-throttle calibration, Baro calibration, base timing, injection setup | Missing |
-| Trigger scope | Missing |
-| Password setup and unlock, ECU and feature unlock | Missing: refused on purpose; a locked ECU stays locked |
-| Update Firmware, Restore to Factory Settings | Missing: blocked at protocol level; cannot be tested on the owner's car |
+## How each area was checked
 
-## Settings
+| Area | Checked | Still different or unproven |
+|---|---|---|
+| Log files (.llg5, .llgx) | Bytes both ways: a real log read here, a log written here opened in real PCLink | `.txt` import |
+| CSV export | Bytes on Full Log | Section and Zoom ranges |
+| Log statistics | Numbers | |
+| ECU log download | Bytes for commands; Numbers for channels, times, markers | Cancel prompts; `ECU` detail field blank |
+| Logging setup, .lls5 | Bytes: 507 of 507 frames; files exchanged both ways | Data Rate label formula; no live plot while recording; some tree groups |
+| Firmware update | Bytes: 1739 of 1739 frames on G5 family | Real boot-mode replies and timings unknown. Stops at the first engine-running refusal, where PCLink retries about 30 times |
+| Factory reset | Bytes for order | No hardware test, by the owner's choice |
+| Passwords, ECU Unlock, memo | Bytes | Temporary unlock always ends on reconnecting |
+| Load a map | Bytes for cells that differ | Real rewrote more cells (334 against 6 changed): unexplained, may be a simulator effect |
+| Save as Encrypted | Sim and spec | Locks to a serial; not strong encryption, and PCLink's isn't either |
+| Compare | Look | Single values only; tables show a count |
+| Table edits, axis changes | Bytes for keys and sizes compared | Copy and export use this project's format; Ctrl+Z undoes one edit; an axis cannot be set to None; Shift+F and Shift+I missing |
+| 3D view | Look, from manual pictures | Wine has no OpenGL |
+| Gauges, value list, pages | Look; all 8 shipped layouts load | Dial and Curve geometry fitted to pictures; pages scale to fit instead of scrolling |
+| Trigger Scope | Bytes and Numbers | |
+| TPS span, MAP, base timing | Bytes | Base timing skips PCLink's brief write of 0 on opening, on purpose |
+| E-throttle, APS | Bytes for what was reached | Second throttle and APS flows unchecked |
+| Baro | Sim | |
+| CAN setup | Bytes for Apply, stream data and .lcf | Device field lists missing (their definition file is not in this install); keypad and lambda partly inferred; devices shown by code, not name |
+| Quick Trim | Numbers | |
+| Quick Tune | Look, statuses up to lockouts | **Real PCLink never reached Ready under Wine, so written values are not compared.** Formula from decoded code |
+| Mixture Map | Numbers in two cells | Filters, AFR display |
+| Knock Audio | Look | FFT window, scaling and draw rates are guesses; not tried with a microphone signal |
+| Options, themes | Look (Black theme) | Blue, White, Gray not compared side by side. Windows Font applies at once |
+| Units | Unit tests of the decoded factors | **Not compared with real PCLink in Imperial.** Table Axis Setup shows base units |
+| Help, event log, fault banner | Look | Real Help window never opened under Wine |
+| G5 connection, comms settings | Bytes for connect order | Value types guessed; G5 logging pages and its log info not done; Network page nests differently |
+| WiFi selection | Sim | Reply format unverified |
+| Packaging | Real macOS build ran against the simulator | Linux build not run since these changes |
+| Mac or G5 with a real ECU | Never | No hardware |
 
-| Feature | Status |
-|---|---|
-| Menu tree, order, per-ECU hiding | Done: PCLink (top level and sampled forms) |
-| Dependent hiding | Native, from a generated table: 242 of 252 forms match real PCLink on one sample map (6 differ, 4 missing) |
-| Warnings and cross-field checks from the rules | Native: 6 messages from the DLL; not yet compared with real PCLink on screen |
-| Units and menu moves from the rules | Native: from the DLL; not yet compared with real PCLink |
-| Related changes from the rules | Missing: real PCLink did not make the one tested |
-| Search | Done: sim (name search only; PCLink's keywords not used) |
-| Tables: heat map, live cell, bulk edit, copy and paste, 3D, axis editing | Done: car (display), sim (edits) |
-| Axis setup form, Quick Tune, Quick Trim, snake trails, tuning markers | Missing |
-| Bit-field picker, memo editor | Missing |
+## Deliberately stricter than PCLink
 
-## Files
+- Loading a map never overwrites an ECU's password settings; a locked ECU refuses loads and saves.
+- A file locked to another serial stays closed and shows no values.
+- Damaged firmware files are refused before any traffic; PCLink ignores failed checks.
+- The Target gauge's pointer accounts for its minimum, which PCLink's code omits.
 
-| Feature | Status |
-|---|---|
-| Open, save, compare maps; offline editing | Done: PCLink opened a saved map |
-| Save as Encrypted, encrypted file editor | Missing; encrypted maps refused |
-| Load a map into the ECU | Missing |
+## Not built
 
-## Views and display
-
-| Feature | Status |
-|---|---|
-| Live list, runtime tree, statistics, dial gauges | Done: car |
-| Digital, bar, curve, target gauges | Missing |
-| Layouts, pages, pop-outs, colour themes, language | Missing |
-| Mixture map, vehicle plan, engine timing diagram, table graph, GPS | Missing |
-| Knock audio | Missing |
-| Help browser | Text only, without images |
-| Unit options, Preferences | Missing (metric only) |
-
-## Logging
-
-| Feature | Status |
-|---|---|
-| PC logging to CSV, time plot | Done: sim |
-| XY plot, histogram | Partial: no colour channel, manual ranges or mixture map |
-| PCLink log file format, log file manager | Missing |
-| Navigator, parameter list, drag and section tools, export | Missing |
-
-## Other
-
-| Feature | Status |
-|---|---|
-| Dyno comms | Missing |
-| G5 comms-processor settings (from parameter 10000) | Missing |
+PCLink's dead code, which has no way in: Injection Setup and Dyno Comms forms. Dyno data arrives through ordinary CAN streams. Internal tools, such as the unlock code generator and the feature lock, are left out on purpose.

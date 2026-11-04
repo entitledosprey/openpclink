@@ -231,12 +231,22 @@ class SimEcu:
         self.log.append(cmd)
         self.frames.append((addr, cmd, bytes(payload)))
         self.addr = addr
+        if cmd == p.CMD_FILE and addr == p.ADDR_MAIN and struct.unpack_from(">I", payload)[0] == p.FILE_STREAM:
+            return self._stream_file(addr, payload)
         try:
             return p.build_reply(addr, cmd, self._dispatch(cmd, payload))
         except SimRefusal as refusal:
             return p.build_reply(addr, p.CMD_ERROR, struct.pack(">H", refusal.code))
         except KeyError:
             return p.build_reply(addr, p.CMD_ERROR, struct.pack(">H", p.ERR_UNSUPPORTED))
+
+    def _stream_file(self, addr: int, payload: bytes) -> bytes:
+        """PCLink's faster download: many replies to one request, then a 00 01 reply."""
+        offset, count = struct.unpack_from(">II", payload, 6)
+        name = payload[14:].split(b"\0", 1)[0].decode("latin-1")
+        data = dict(self.ecu_logs).get(name, b"")[offset : offset + count]
+        frames = [p.build_reply(addr, p.CMD_FILE, data[at : at + 512]) for at in range(0, len(data), 512)]
+        return b"".join(frames) + p.build_reply(addr, p.CMD_FILE, struct.pack(">H", 1))
 
     def _dispatch(self, cmd: int, payload: bytes) -> bytes:
         if self.addr == p.ADDR_COMMS:

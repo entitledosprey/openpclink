@@ -17,9 +17,6 @@ See [what is done and what is left](#what-is-done-and-what-is-left), [the full c
 Download from this repo's [v0.5.0 release](https://github.com/entitledosprey/openpclink/releases/tag/v0.5.0),
 or with the GitHub CLI: `gh release download v0.5.0 -R entitledosprey/openpclink -p '<file>'`.
 
-The packages contain Link's parameter data, so **keep this repo private and do not share them**;
-they are not licensed for redistribution.
-
 | System | File | Install |
 |---|---|---|
 | macOS (Apple Silicon) | `OpenPCLink-0.5.0-macos-arm64.dmg` | Open it, drag to Applications, then see below |

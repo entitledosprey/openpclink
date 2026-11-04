@@ -14,21 +14,18 @@ See [what is done and what is left](#what-is-done-and-what-is-left), [the full c
 
 ## Install
 
-Download from this repo's [v0.4.0 release](https://github.com/entitledosprey/openpclink/releases/tag/v0.4.0),
-or with the GitHub CLI: `gh release download v0.4.0 -R entitledosprey/openpclink -p '<file>'`.
-
-**That release predates most of what this page describes.** It has the older window and none of the new tools. To run
-the current code, build it as described below.
+Download from this repo's [v0.5.0 release](https://github.com/entitledosprey/openpclink/releases/tag/v0.5.0),
+or with the GitHub CLI: `gh release download v0.5.0 -R entitledosprey/openpclink -p '<file>'`.
 
 The packages contain Link's parameter data, so **keep this repo private and do not share them**;
 they are not licensed for redistribution.
 
 | System | File | Install |
 |---|---|---|
-| macOS (Apple Silicon) | `OpenPCLink-0.4.0-macos-arm64.dmg` | Open it, drag to Applications, then see below |
-| Debian/Ubuntu x86-64 | `openpclink_0.4.0_amd64.deb` | `sudo apt install ./openpclink_0.4.0_amd64.deb` |
-| Debian/Ubuntu ARM64 | `openpclink_0.4.0_arm64.deb` | `sudo apt install ./openpclink_0.4.0_arm64.deb` |
-| Other Linux | `OpenPCLink-0.4.0-linux-*.tar.gz` | Unpack, run `OpenPCLink`, install `packaging/70-link-ecu.rules` to `/etc/udev/rules.d/` |
+| macOS (Apple Silicon) | `OpenPCLink-0.5.0-macos-arm64.dmg` | Open it, drag to Applications, then see below |
+| Debian/Ubuntu x86-64 | `openpclink_0.5.0_amd64.deb` | `sudo apt install ./openpclink_0.5.0_amd64.deb` |
+| Debian/Ubuntu ARM64 | `openpclink_0.5.0_arm64.deb` | `sudo apt install ./openpclink_0.5.0_arm64.deb` |
+| Other Linux | `OpenPCLink-0.5.0-linux-*.tar.gz` | Unpack, run `OpenPCLink`, install `packaging/70-link-ecu.rules` to `/etc/udev/rules.d/` |
 
 **macOS:** the app is not notarised, so a downloaded copy is blocked until you clear its quarantine flag.
 This has not been tested on a second Mac:
@@ -149,7 +146,7 @@ layouts (all 8 shipped layouts load), gauges, the Options dialog, colour themes 
 - Table Axis Setup shows base units
 - Logging: live plot while recording, the Data Rate label, some parameter tree groups, old `.txt` log import
 - Dial and Curve gauges are fitted to pictures, and pages scale to fit instead of scrolling
-- A new release: the Linux package has not been rebuilt since these changes
+- Live values update at about 10 Hz here, against about 100 Hz in real PCLink
 
 **Rules:** dependent-setting rules run natively from a data table generated at build time from your copy of PCLink.
 They cover hiding, warnings, unit changes and menu moves. Related-setting changes are not included, and accuracy on a

@@ -1,16 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-import os
-
 from PyInstaller.utils.hooks import collect_submodules
-
-# Bake the data first (packaging/common.sh does): the parameter database, manual pictures, and PCLink's own
-# layouts, CAN setups, firmware, runtime and tuning view layouts, parameter config and logging options.
-for needed in ('pclink-data.json.gz', 'pclink-help.json.gz', 'pclink-help-images', 'pclink-rules.json.gz',
-               'pclink-assets/Layouts', 'pclink-assets/CAN', 'pclink-assets/Firmware', 'pclink-assets/RuntimeViewLayout',
-               'pclink-assets/TSViewlayout', 'pclink-assets/TSViewlayoutM', 'pclink-assets/DefaultParameterConfig.rtcr',
-               'pclink-assets/LoggingOptions.xml'):
-    if not os.path.exists(os.path.join('src/openpclink/data', needed)):
-        raise SystemExit(f'src/openpclink/data/{needed} is missing: run packaging/common.sh bake_and_freeze, or openpclink import')
 
 hiddenimports = ['openpclink.cli', 'openpclink.gui', 'openpclink.link_helper', 'serial.tools.list_ports', 'PySide6.QtMultimedia']
 hiddenimports += collect_submodules('pyftdi')

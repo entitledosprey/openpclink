@@ -57,7 +57,8 @@ Extra here, not in PCLink's menus: Baro Calibration, APS and E-Throttle Calibrat
 | Help, event log, fault banner | Look | Real Help window never opened under Wine |
 | G5 connection, comms settings | Bytes for connect order | Value types guessed; G5 logging pages and its log info not done; Network page nests differently |
 | WiFi selection | Sim | Reply format unverified |
-| Packaging | Real macOS build ran against the simulator | Linux build not run since these changes |
+| Packaging | v0.5.0: macOS, Linux amd64 and arm64 builds each connected to the simulator; Linux .debs installed in Docker | Not installed on a real Linux desktop or a second Mac |
+| Live update rate | | About 10 Hz here, about 100 Hz in real PCLink |
 | Mac or G5 with a real ECU | Never | No hardware |
 
 ## Deliberately stricter than PCLink
